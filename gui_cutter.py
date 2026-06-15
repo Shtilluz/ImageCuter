@@ -15,6 +15,9 @@ class SpriteCutterApp:
         self.root.geometry("1000x800")
         self.root.minsize(800, 600)
 
+        # Установка иконки
+        self.set_app_icon()
+
         # Переменные путей
         self.input_paths = []
         self.current_image_idx = 0
@@ -25,6 +28,17 @@ class SpriteCutterApp:
         self.preview_image = None
 
         self.setup_ui()
+
+    def set_app_icon(self):
+        icon_path = os.path.join(os.path.dirname(__file__), "resource", "Icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon_img = ImageTk.PhotoImage(file=icon_path)
+                self.root.iconphoto(False, icon_img)
+                # Сохраняем ссылку, чтобы garbage collector не удалил её
+                self._icon_ref = icon_img
+            except Exception as e:
+                print(f"Не удалось загрузить иконку: {e}")
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -116,9 +130,35 @@ class SpriteCutterApp:
         self.btn_save = tk.Button(sidebar, text="РАЗДЕЛИТЬ И СОХРАНИТЬ ВСЕ", command=self.save_sprites, bg="#7289da", fg="white", font=("Arial", 11, "bold"), height=2, state=tk.DISABLED)
         self.btn_save.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
 
-        # Область просмотра (Справа)
-        self.preview_panel = tk.Label(self.root, text="Загрузите изображения для предпросмотра", bg="#36393f", fg="#72767d", font=("Arial", 14))
-        self.preview_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Кнопки Инфо и Автор
+        info_frame = tk.Frame(sidebar, bg="#2e3136")
+        info_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        
+        tk.Button(info_frame, text="Инструкция", command=self.show_instructions, bg="#4f545c", fg="white", font=("Arial", 9)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(info_frame, text="Автор", command=self.show_author, bg="#4f545c", fg="white", font=("Arial", 9)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+    def show_instructions(self):
+        instructions = (
+            "1. Нажмите 'Выбрать картинки' и выберите один или несколько файлов.\n"
+            "2. Выберите 'Папку сохранения' или выберите из недавних.\n"
+            "3. Отрегулируйте 'Порог фона':\n"
+            "   - Для белого фона: выше порог = меньше лишнего.\n"
+            "   - Для черного фона: выше порог = больше чувствительность.\n"
+            "4. 'Мин. размер' отсеивает мелкий мусор.\n"
+            "5. Используйте '<<' и '>>' для проверки всех картинок.\n"
+            "6. Нажмите 'РАЗДЕЛИТЬ И СОХРАНИТЬ ВСЕ'.\n\n"
+            "Программа автоматически находит объекты и сохраняет их как прозрачные PNG."
+        )
+        messagebox.showinfo("Инструкция", instructions)
+
+    def show_author(self):
+        author_info = (
+            "Автор: Shtillgor\n"
+            "Сайт: https://midgro.uz/\n"
+            "Телефон: +998909603560\n\n"
+            "Разработано для автоматизации нарезки спрайтов."
+        )
+        messagebox.showinfo("Об авторе", author_info)
 
     def update_recent_menu(self):
         self.recent_menu['values'] = self.recent_dirs
