@@ -239,18 +239,12 @@ class SpriteCutterApp:
         self.preview_panel.config(image=self.preview_image, text="")
         
     def get_next_index(self):
-        try:
-            existing_files = os.listdir(self.output_dir)
-        except:
-            return 0
-            
+        existing_files = os.listdir(self.output_dir)
         indices = []
         for f in existing_files:
             if f.startswith("sprite_") and f.endswith(".png"):
                 try:
-                    # Извлекаем число между 'sprite_' и '.png'
-                    num_part = f[7:-4]
-                    idx = int(num_part)
+                    idx = int(f[7:10])
                     indices.append(idx)
                 except ValueError:
                     continue
@@ -299,6 +293,11 @@ class SpriteCutterApp:
 
         messagebox.showinfo("Готово!", f"Успешно сохранено {total_saved} прозрачных спрайтов в папку:\n{self.output_dir}")
 
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SpriteCutterApp(root)
+    root.update()
+    root.mainloop()
 if __name__ == "__main__":
     root = tk.Tk()
     app = SpriteCutterApp(root)
