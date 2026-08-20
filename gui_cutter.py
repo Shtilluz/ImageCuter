@@ -58,7 +58,8 @@ class SpriteCutterApp:
         for attr, title in [("t_auto", "  Авто-нарезчик  "),
                              ("t_tile", "  Тайловая сетка  "),
                              ("t_shape","  Вырезание фигур  "),
-                             ("t_mgr",  "  Менеджер спрайтов  ")]:
+                             ("t_mgr",  "  Менеджер спрайтов  "),
+                             ("t_atlas","  Сборка атласа  ")]:
             f = tk.Frame(self.nb, bg=BG)
             setattr(self, attr, f)
             self.nb.add(f, text=title)
@@ -67,6 +68,7 @@ class SpriteCutterApp:
         self._build_tile()
         self._build_shape()
         self._build_mgr()
+        self._build_atlas()
 
     # ═══════════════════════════════════════════════════════════════
     #  ОБЩИЕ УТИЛИТЫ
@@ -1040,6 +1042,284 @@ class SpriteCutterApp:
                             f"Сохранён: {out}")
 
     # ═══════════════════════════════════════════════════════════════
+    #  ВКЛАДКА 5 — СБОРКА АТЛАСА
+    # ═══════════════════════════════════════════════════════════════
+
+    def _build_atlas(self):
+        sb = self._sidebar(self.t_atlas)
+        area = self._area(self.t_atlas)
+
+        self._lbl(sb, "1. Изображение", bold=True).pack(anchor=tk.W, pady=(0, 8))
+        self._btn(sb, "Открыть картинку (без фона)", self.atlas_open, GRN, h=2).pack(fill=tk.X, pady=3)
+        self.atlas_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
+        self.atlas_lbl_file.pack(anchor=tk.W)
+
+        self._sep(sb)
+        self._lbl(sb, "2. Поиск объектов", bold=True).pack(anchor=tk.W, pady=(0, 5))
+
+        self._lbl(sb, "Порог фона (200–255):").pack(anchor=tk.W)
+        self.atlas_thresh = tk.Scale(sb, from_=200, to=255, orient=tk.HORIZONTAL,
+                                     bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
+        self.atlas_thresh.set(245)
+        self.atlas_thresh.pack(fill=tk.X)
+        self.atlas_thresh.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
+
+        self._lbl(sb, "Мин. размер объекта (пикс):").pack(anchor=tk.W, pady=(8, 0))
+        self.atlas_min = tk.Scale(sb, from_=5, to=150, orient=tk.HORIZONTAL,
+                                  bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
+        self.atlas_min.set(12)
+        self.atlas_min.pack(fill=tk.X)
+        self.atlas_min.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
+
+        self.atlas_lbl_cnt = self._lbl(sb, "Найдено объектов: 0", color=GOLD, bold=True)
+        self.atlas_lbl_cnt.pack(anchor=tk.W, pady=6)
+
+        self._sep(sb)
+        self._lbl(sb, "3. Размер одного объекта", bold=True).pack(anchor=tk.W, pady=(0, 5))
+
+        pf = tk.Frame(sb, bg=BG)
+        pf.pack(fill=tk.X, pady=2)
+        for val in (16, 32, 64, 128, 256):
+            self._btn(pf, str(val), lambda v=val: self._atlas_preset(v),
+                      font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
+
+        cf = tk.Frame(sb, bg=BG)
+        cf.pack(fill=tk.X, pady=(6, 2))
+        self._lbl(cf, "Ячейка (пикс):").pack(side=tk.LEFT)
+        self.atlas_cell = tk.IntVar(value=64)
+        self._spinbox(cf, self.atlas_cell, 4, 2048, cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
+        self.atlas_cell.trace_add("write", lambda *_: self._atlas_update())
+
+        self.atlas_scale_fit = tk.BooleanVar(value=True)
+        tk.Checkbutton(sb, text="Масштабировать объект под ячейку", variable=self.atlas_scale_fit,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_update).pack(anchor=tk.W, pady=(4, 0))
+
+        self.atlas_no_upscale = tk.BooleanVar(value=True)
+        tk.Checkbutton(sb, text="Не увеличивать мелкие объекты", variable=self.atlas_no_upscale,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_update).pack(anchor=tk.W)
+
+        self._sep(sb)
+        self._lbl(sb, "4. Компоновка атласа", bold=True).pack(anchor=tk.W, pady=(0, 5))
+
+        gf = tk.Frame(sb, bg=BG)
+        gf.pack(fill=tk.X, pady=2)
+        self._lbl(gf, "Столбцов:").pack(side=tk.LEFT)
+        self.atlas_cols = tk.IntVar(value=8)
+        self._spinbox(gf, self.atlas_cols, 1, 128, cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
+        self.atlas_cols.trace_add("write", lambda *_: self._atlas_update())
+
+        self._lbl(sb, "Ячейки без зазора — атлас точно кратен\nразмеру ячейки (для движков/тайлмапов).",
+                  color=FG2, size=8).pack(anchor=tk.W, pady=(2, 0))
+
+        self._btn(sb, "Обновить превью", self._atlas_update).pack(fill=tk.X, pady=(6, 4))
+
+        self.atlas_lbl_size = self._lbl(sb, "Размер атласа: — (авторасчёт)", color=FG2)
+        self.atlas_lbl_size.pack(anchor=tk.W)
+
+        self._sep(sb)
+        self._btn(sb, "Папка сохранения", self.atlas_out_dir).pack(fill=tk.X)
+        self.atlas_lbl_out = self._lbl(sb, "Папка не выбрана", color=FG2)
+        self.atlas_lbl_out.pack(anchor=tk.W, pady=(3, 0))
+
+        self._lbl(sb, "Имя файла:").pack(anchor=tk.W, pady=(6, 0))
+        self.atlas_name = tk.StringVar(value="atlas")
+        self.atlas_name_entry = tk.Entry(sb, textvariable=self.atlas_name, bg=BTN, fg=FG,
+                                         relief=tk.FLAT, insertbackground=FG)
+        self.atlas_name_entry.pack(fill=tk.X, pady=(2, 0))
+        self.atlas_name_entry.bind("<KeyRelease>", lambda _: setattr(self, "_atlas_name_manual", True))
+
+        self.atlas_btn_save = self._btn(sb, "СОБРАТЬ И СОХРАНИТЬ АТЛАС", self.atlas_save,
+                                        ACC, h=2, state=tk.DISABLED)
+        self.atlas_btn_save.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+
+        self.atlas_canvas = tk.Canvas(area, bg="#1e2124", highlightthickness=0)
+        self.atlas_canvas.pack(fill=tk.BOTH, expand=True)
+        self.atlas_canvas.bind("<Configure>", lambda _: self._atlas_update())
+
+        self.atlas_img    = None
+        self.atlas_outdir = ""
+        self.atlas_photo  = None
+        self.atlas_sheet  = None   # собранный атлас (PIL RGBA, полное разрешение)
+        self.atlas_count  = 0
+        self.atlas_src_path    = None
+        self._atlas_name_manual = False
+
+    def atlas_open(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
+        if not path: return
+        self.atlas_img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        self.atlas_src_path = path
+        self.atlas_lbl_file.config(text=f"{os.path.basename(path)}  "
+                                        f"({self.atlas_img.shape[1]}×{self.atlas_img.shape[0]})")
+        if not self.atlas_outdir:
+            self.atlas_outdir = os.path.dirname(path)
+            self.atlas_lbl_out.config(text=self.atlas_outdir)
+            self._add_recent(self.atlas_outdir)
+        self._atlas_name_manual = False
+        self._atlas_suggest_name()
+        self._atlas_update()
+
+    def atlas_out_dir(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.atlas_outdir = d
+            self.atlas_lbl_out.config(text=d)
+            self._add_recent(d)
+            self._atlas_suggest_name()
+            if self.atlas_sheet is not None:
+                self.atlas_btn_save.config(state=tk.NORMAL)
+
+    def _atlas_suggest_name(self):
+        """Предлагает имя файла атласа, если пользователь не менял его вручную."""
+        if self._atlas_name_manual:
+            return
+        base = (os.path.splitext(os.path.basename(self.atlas_src_path))[0] + "_atlas"
+                if self.atlas_src_path else "atlas")
+        name = base
+        if self.atlas_outdir:
+            n = 1
+            while os.path.exists(os.path.join(self.atlas_outdir, name + ".png")):
+                n += 1
+                name = f"{base}_{n}"
+        self.atlas_name.set(name)
+
+    def _atlas_preset(self, v):
+        self.atlas_cell.set(v)
+        self._atlas_update()
+
+    def _atlas_build(self):
+        """Находит объекты, выравнивает каждый в ячейку и собирает атлас
+        без зазоров — атлас строго кратен размеру ячейки (cols*cell × rows*cell).
+        Возвращает (PIL RGBA атлас, кол-во объектов, ячейка, столбцы, строки)
+        либо (None, 0, ..., ...) если объектов нет."""
+        img = self.atlas_img
+        cell0 = max(4, self.atlas_cell.get())
+        if img is None: return None, 0, cell0, 0, 0
+        tv = self.atlas_thresh.get()
+        ms = self.atlas_min.get()
+        contours = self._auto_contours(img, tv, ms)
+        if not contours: return None, 0, cell0, 0, 0
+
+        cell = cell0
+        cols = max(1, self.atlas_cols.get())
+        fit  = self.atlas_scale_fit.get()
+        no_up = self.atlas_no_upscale.get()
+
+        rgba = (cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                if len(img.shape) == 3 and img.shape[2] == 3 else img.copy())
+
+        # сортировка объектов сверху-вниз, слева-направо (по строкам исходной картинки)
+        boxes = [cv2.boundingRect(c) for c in contours]
+        boxes.sort(key=lambda b: (b[1] // max(1, cell), b[0]))
+
+        tiles = []
+        for (x, y, w, h) in boxes:
+            crop = rgba[y:y+h, x:x+w]
+            pil = self._cv2pil(crop).convert("RGBA")
+            if fit:
+                scale = min(cell / pil.width, cell / pil.height)
+                if no_up:
+                    scale = min(scale, 1.0)
+                if scale != 1.0:
+                    nw = max(1, round(pil.width * scale))
+                    nh = max(1, round(pil.height * scale))
+                    pil = pil.resize((nw, nh), Image.LANCZOS)
+            elif pil.width > cell or pil.height > cell:
+                l = max(0, (pil.width  - cell) // 2)
+                t = max(0, (pil.height - cell) // 2)
+                pil = pil.crop((l, t, l + min(cell, pil.width), t + min(cell, pil.height)))
+            tiles.append(pil)
+
+        n = len(tiles)
+        cols = min(cols, n)
+        rows = (n + cols - 1) // cols
+        sheet = Image.new("RGBA", (cols * cell, rows * cell), (0, 0, 0, 0))
+
+        for i, pil in enumerate(tiles):
+            r, c = divmod(i, cols)
+            cx = c * cell
+            cy = r * cell
+            ox = cx + (cell - pil.width)  // 2
+            oy = cy + (cell - pil.height) // 2
+            sheet.paste(pil, (ox, oy), pil)
+
+        return sheet, n, cell, cols, rows
+
+    def _atlas_update(self, *_):
+        if self.atlas_img is None: return
+        try:
+            sheet, n, cell, cols, rows = self._atlas_build()
+        except tk.TclError:
+            # переменная спинбокса временно пуста/невалидна во время ручного ввода
+            return
+        self.atlas_lbl_cnt.config(text=f"Найдено объектов: {n}")
+        self.atlas_sheet = sheet
+        self.atlas_count = n
+
+        if sheet is None:
+            self.atlas_canvas.delete("all")
+            self.atlas_lbl_size.config(text="Размер атласа: — (авторасчёт)")
+            self.atlas_btn_save.config(state=tk.DISABLED)
+            return
+
+        self.atlas_lbl_size.config(text=f"Размер атласа: {sheet.width}×{sheet.height} (авторасчёт)")
+
+        # рисуем сетку границ ячеек прямо на превью атласа
+        vis = Image.new("RGB", sheet.size, (30, 33, 36))
+        vis.paste(sheet, (0, 0), sheet)
+        draw = ImageDraw.Draw(vis)
+        for r in range(rows):
+            for c in range(cols):
+                x = c * cell
+                y = r * cell
+                draw.rectangle([x, y, x + cell - 1, y + cell - 1], outline="#00e050", width=1)
+
+        cw = self.atlas_canvas.winfo_width()  or 700
+        ch = self.atlas_canvas.winfo_height() or 600
+        preview = vis
+        preview.thumbnail((cw, ch), Image.LANCZOS)
+        self.atlas_photo = ImageTk.PhotoImage(preview)
+        self.atlas_canvas.delete("all")
+        self.atlas_canvas.create_image(cw // 2, ch // 2, anchor=tk.CENTER, image=self.atlas_photo)
+
+        self.atlas_btn_save.config(state=tk.NORMAL if self.atlas_outdir else tk.DISABLED)
+
+    def atlas_save(self):
+        if self.atlas_img is None or not self.atlas_outdir:
+            messagebox.showwarning("Ошибка", "Соберите атлас и выберите папку сохранения")
+            return
+        # пересобираем прямо перед сохранением — превью могло не обновиться,
+        # если значение поля было введено вручную без потери фокуса
+        sheet, n, *_ = self._atlas_build()
+        if sheet is None:
+            messagebox.showwarning("Ошибка", "Объекты не найдены")
+            return
+        self.atlas_sheet = sheet
+        self.atlas_count = n
+
+        name = self.atlas_name.get().strip()
+        if not name:
+            messagebox.showwarning("Ошибка", "Введите имя файла")
+            return
+        name = "".join(ch for ch in name if ch not in '\\/:*?"<>|')
+        if not name.lower().endswith(".png"):
+            name += ".png"
+        out = os.path.join(self.atlas_outdir, name)
+        if os.path.exists(out) and not messagebox.askyesno(
+                "Файл существует", f"Файл «{name}» уже существует. Перезаписать?"):
+            return
+        self.atlas_sheet.save(out)
+        messagebox.showinfo("Готово!",
+                            f"Атлас {self.atlas_sheet.width}×{self.atlas_sheet.height} px, "
+                            f"{self.atlas_count} объектов\n"
+                            f"Сохранён: {out}")
+        self._atlas_name_manual = False
+        self._atlas_suggest_name()
+
+    # ═══════════════════════════════════════════════════════════════
     #  ОБЩИЕ ДИАЛОГИ
     # ═══════════════════════════════════════════════════════════════
 
@@ -1064,6 +1344,13 @@ class SpriteCutterApp:
             "  Снимайте/ставьте галочки для выбора нужных.\n"
             "  Удалите незмеченных из списка если нужно.\n"
             "  Выберите количество столбцов и отступ → Собрать спрайт-лист.\n\n"
+            "СБОРКА АТЛАСА\n"
+            "  Откройте картинку без фона с несколькими объектами.\n"
+            "  Программа находит объекты по контурам (порог/мин. размер).\n"
+            "  Выберите размер ячейки (16/32/64/128/256 или свой) —\n"
+            "  каждый объект масштабируется и выравнивается по центру ячейки.\n"
+            "  Столбцы и зазор задают компоновку, размер атласа считается\n"
+            "  автоматически. Собрать и сохранить — готовый atlas_XXXX.png.\n\n"
             "ЛИЦЕНЗИЯ: Разрешено использование при обязательном указании\n"
             "автора (Shtillgor) и ссылки https://midgro.uz/"
         ))
