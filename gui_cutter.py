@@ -59,7 +59,8 @@ class SpriteCutterApp:
                              ("t_tile", "  Тайловая сетка  "),
                              ("t_shape","  Вырезание фигур  "),
                              ("t_mgr",  "  Менеджер спрайтов  "),
-                             ("t_atlas","  Сборка атласа  ")]:
+                             ("t_atlas","  Сборка атласа  "),
+                             ("t_tilecheck", "  Тайл-тест  ")]:
             f = tk.Frame(self.nb, bg=BG)
             setattr(self, attr, f)
             self.nb.add(f, text=title)
@@ -69,6 +70,7 @@ class SpriteCutterApp:
         self._build_shape()
         self._build_mgr()
         self._build_atlas()
+        self._build_tilecheck()
 
     # ═══════════════════════════════════════════════════════════════
     #  ОБЩИЕ УТИЛИТЫ
@@ -1318,6 +1320,420 @@ class SpriteCutterApp:
                             f"Сохранён: {out}")
         self._atlas_name_manual = False
         self._atlas_suggest_name()
+
+    # ═══════════════════════════════════════════════════════════════
+    #  ВКЛАДКА 6 — ТАЙЛ-ТЕСТ
+    # ═══════════════════════════════════════════════════════════════
+
+    def _build_tilecheck(self):
+        sb   = self._sidebar(self.t_tilecheck)
+        area = self._area(self.t_tilecheck)
+
+        self._lbl(sb, "1. Изображение", bold=True).pack(anchor=tk.W, pady=(0, 8))
+        self._btn(sb, "Открыть изображение", self.tc_open, GRN, h=2).pack(fill=tk.X, pady=3)
+        self.tc_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
+        self.tc_lbl_file.pack(anchor=tk.W)
+
+        self._sep(sb)
+        self._lbl(sb, "2. Размер тайла превью (пикс)", bold=True).pack(anchor=tk.W, pady=(0, 6))
+        self.tc_size = tk.IntVar(value=64)
+        szf = tk.Frame(sb, bg=BG)
+        szf.pack(fill=tk.X)
+        for sz in (32, 64, 128, 256, 512):
+            tk.Radiobutton(szf, text=str(sz), variable=self.tc_size, value=sz,
+                           bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                           font=("Arial", 9, "bold"),
+                           command=self._tc_size_changed).pack(side=tk.LEFT, padx=2)
+
+        self._lbl(sb, "Размер выбора:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
+        slf = tk.Frame(sb, bg=BG)
+        slf.pack(fill=tk.X)
+        self._lbl(slf, "Ш:").pack(side=tk.LEFT)
+        self.tc_sel_w = tk.IntVar(value=64)
+        self._spinbox(slf, self.tc_sel_w, 1, 4096, w=5,
+                      cmd=self._tc_render).pack(side=tk.LEFT, padx=(2, 8))
+        self._lbl(slf, "В:").pack(side=tk.LEFT)
+        self.tc_sel_h = tk.IntVar(value=64)
+        self._spinbox(slf, self.tc_sel_h, 1, 4096, w=5,
+                      cmd=self._tc_render).pack(side=tk.LEFT, padx=2)
+
+        self._sep(sb)
+        self._lbl(sb, "3. Размер сетки превью", bold=True).pack(anchor=tk.W, pady=(0, 6))
+        self.tc_grid = tk.IntVar(value=3)
+        grf = tk.Frame(sb, bg=BG)
+        grf.pack(fill=tk.X)
+        for n in (3, 4, 5, 6, 7):
+            tk.Radiobutton(grf, text=f"{n}×{n}", variable=self.tc_grid, value=n,
+                           bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                           font=("Arial", 9, "bold"),
+                           command=self._tc_render).pack(side=tk.LEFT, padx=2)
+
+        self._sep(sb)
+        self._lbl(sb, "4. Позиция среза", bold=True).pack(anchor=tk.W, pady=(0, 4))
+        self.tc_lbl_offset = self._lbl(sb, "X: 0   Y: 0", color=GOLD)
+        self.tc_lbl_offset.pack(anchor=tk.W)
+
+        self.tc_snap = tk.BooleanVar(value=False)
+        tk.Checkbutton(sb, text="Привязка к сетке тайлов",
+                       variable=self.tc_snap, bg=BG, fg=FG,
+                       selectcolor=BTN, activebackground=BG).pack(anchor=tk.W, pady=(6, 0))
+
+        self._btn(sb, "Сброс позиции (0, 0)", self._tc_reset).pack(fill=tk.X, pady=(8, 4))
+
+        zf = tk.Frame(sb, bg=BG)
+        zf.pack(fill=tk.X)
+        self._lbl(zf, "Зум:").pack(side=tk.LEFT)
+        self.tc_lbl_zoom = self._lbl(zf, "100%", color=GOLD)
+        self.tc_lbl_zoom.pack(side=tk.LEFT, padx=6)
+        self._btn(zf, "↺", self._tc_zoom_reset, h=1).pack(side=tk.RIGHT)
+
+        self._sep(sb)
+        self._btn(sb, "Папка сохранения", self.tc_out_dir).pack(fill=tk.X)
+        self.tc_lbl_out = self._lbl(sb, "Папка не выбрана", color=FG2)
+        self.tc_lbl_out.pack(anchor=tk.W, pady=(3, 0))
+
+        btm = tk.Frame(sb, bg=BG)
+        btm.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._lbl(btm, "Имя файла:").pack(anchor=tk.W, pady=(0, 2))
+        self.tc_name = tk.Entry(btm, bg=BTN, fg=FG, insertbackground=FG,
+                                relief=tk.FLAT, font=("Arial", 10))
+        self.tc_name.insert(0, "tile")
+        self.tc_name.pack(fill=tk.X, pady=(0, 6))
+
+        self.tc_btn_save = self._btn(btm, "СОХРАНИТЬ ТАЙЛ", self.tc_save,
+                                     ACC, h=2, state=tk.DISABLED)
+        self.tc_btn_save.pack(fill=tk.X, pady=(0, 4))
+
+        # ---- Рабочая область: две панели ----
+        lp = tk.Frame(area, bg=BG2)
+        lp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ttk.Separator(area, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=1)
+
+        rp = tk.Frame(area, bg=BG2)
+        rp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(lp, text="Исходное изображение  —  тяните мышью для выбора области",
+                 bg=BG2, fg=FG2, font=("Arial", 8, "italic")).pack(pady=3)
+        self.tc_lbl_grid = tk.Label(rp, text="Превью тайла  3 × 3  (видны стыки)",
+                                    bg=BG2, fg=FG2, font=("Arial", 8, "italic"))
+        self.tc_lbl_grid.pack(pady=3)
+
+        self.tc_src_cv = tk.Canvas(lp, bg="#1e2124", highlightthickness=0, cursor="fleur")
+        self.tc_src_cv.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
+
+        self.tc_prev_cv = tk.Canvas(rp, bg="#1e2124", highlightthickness=0)
+        self.tc_prev_cv.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
+
+        self.tc_src_cv.bind("<ButtonPress-1>",   self._tc_press)
+        self.tc_src_cv.bind("<B1-Motion>",       self._tc_drag)
+        self.tc_src_cv.bind("<ButtonRelease-1>", self._tc_release)
+        self.tc_src_cv.bind("<Configure>",       lambda _: self._tc_render())
+        self.tc_prev_cv.bind("<Configure>",      lambda _: self._tc_render())
+
+        for key in ("<Left>", "<Right>", "<Up>", "<Down>",
+                    "<Shift-Left>", "<Shift-Right>", "<Shift-Up>", "<Shift-Down>"):
+            self.tc_src_cv.bind(key, self._tc_arrow)
+
+        self.tc_src_cv.bind("<MouseWheel>",      self._tc_wheel)
+        self.tc_src_cv.bind("<Button-4>",        self._tc_wheel)
+        self.tc_src_cv.bind("<Button-5>",        self._tc_wheel)
+        self.tc_src_cv.bind("<ButtonPress-2>",   self._tc_pan_press)
+        self.tc_src_cv.bind("<B2-Motion>",       self._tc_pan_drag)
+        self.tc_src_cv.bind("<ButtonRelease-2>", self._tc_pan_release)
+
+        self.tc_pil     = None
+        self.tc_outdir  = ""
+        self.tc_cx      = 0
+        self.tc_cy      = 0
+        self.tc_scale   = 1.0
+        self.tc_ox      = 0
+        self.tc_oy      = 0
+        self.tc_zoom    = 1.0
+        self.tc_view_x  = 0
+        self.tc_view_y  = 0
+        self.tc_drag0   = None
+        self.tc_pan0    = None
+        self.tc_src_ph  = None
+        self.tc_prev_ph = None
+
+    def tc_open(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
+        if not path:
+            return
+        self.tc_pil = Image.open(path).convert("RGBA")
+        self.tc_lbl_file.config(
+            text=f"{os.path.basename(path)}  ({self.tc_pil.width}×{self.tc_pil.height})")
+        if not self.tc_outdir:
+            self.tc_outdir = os.path.dirname(path)
+            self.tc_lbl_out.config(text=self.tc_outdir)
+            self._add_recent(self.tc_outdir)
+        self.tc_cx = 0
+        self.tc_cy = 0
+        self.tc_zoom   = 1.0
+        self.tc_view_x = 0
+        self.tc_view_y = 0
+        self.tc_lbl_offset.config(text="X: 0   Y: 0")
+        self.tc_lbl_zoom.config(text="100%")
+        self.tc_btn_save.config(state=tk.NORMAL)
+        self._tc_render()
+
+    def _tc_size_changed(self):
+        sz = self.tc_size.get()
+        self.tc_sel_w.set(sz)
+        self.tc_sel_h.set(sz)
+        if self.tc_pil is None:
+            return
+        iw, ih = self.tc_pil.size
+        self.tc_cx = int(max(0, min(self.tc_cx, iw - sz)))
+        self.tc_cy = int(max(0, min(self.tc_cy, ih - sz)))
+        self.tc_lbl_offset.config(text=f"X: {self.tc_cx}   Y: {self.tc_cy}")
+        self._tc_render()
+
+    def _tc_reset(self):
+        self.tc_cx = 0
+        self.tc_cy = 0
+        self.tc_lbl_offset.config(text="X: 0   Y: 0")
+        self._tc_render()
+
+    def _tc_press(self, e):
+        self.tc_src_cv.focus_set()
+        if self.tc_pil is None:
+            return
+        sw, sh = max(1, self.tc_sel_w.get()), max(1, self.tc_sel_h.get())
+        iw, ih = self.tc_pil.size
+        if iw < sw or ih < sh:
+            return
+        ix = (e.x - self.tc_ox) / self.tc_scale
+        iy = (e.y - self.tc_oy) / self.tc_scale
+        self.tc_cx = int(max(0, min(ix - sw / 2, iw - sw)))
+        self.tc_cy = int(max(0, min(iy - sh / 2, ih - sh)))
+        if self.tc_snap.get():
+            sz = self.tc_size.get()
+            self.tc_cx = (self.tc_cx // sz) * sz
+            self.tc_cy = (self.tc_cy // sz) * sz
+        self.tc_drag0 = (e.x, e.y, self.tc_cx, self.tc_cy)
+        self.tc_lbl_offset.config(text=f"X: {self.tc_cx}   Y: {self.tc_cy}")
+        self._tc_render()
+
+    def _tc_arrow(self, e):
+        if self.tc_pil is None:
+            return
+        sw, sh = max(1, self.tc_sel_w.get()), max(1, self.tc_sel_h.get())
+        iw, ih = self.tc_pil.size
+        step   = 10 if (e.state & 0x1) else 1
+        dx, dy = 0, 0
+        if   "Left"  in e.keysym: dx = -step
+        elif "Right" in e.keysym: dx =  step
+        elif "Up"    in e.keysym: dy = -step
+        elif "Down"  in e.keysym: dy =  step
+        self.tc_cx = int(max(0, min(self.tc_cx + dx, iw - sw)))
+        self.tc_cy = int(max(0, min(self.tc_cy + dy, ih - sh)))
+        self.tc_lbl_offset.config(text=f"X: {self.tc_cx}   Y: {self.tc_cy}")
+        self._tc_render()
+
+    def _tc_drag(self, e):
+        if self.tc_drag0 is None or self.tc_pil is None:
+            return
+        sx, sy, cx0, cy0 = self.tc_drag0
+        sw, sh = max(1, self.tc_sel_w.get()), max(1, self.tc_sel_h.get())
+        iw, ih = self.tc_pil.size
+        dx = (e.x - sx) / self.tc_scale
+        dy = (e.y - sy) / self.tc_scale
+        nx = cx0 + dx
+        ny = cy0 + dy
+        if self.tc_snap.get():
+            sn = self.tc_size.get()
+            nx = round(nx / sn) * sn
+            ny = round(ny / sn) * sn
+        self.tc_cx = int(max(0, min(nx, iw - sw)))
+        self.tc_cy = int(max(0, min(ny, ih - sh)))
+        self.tc_lbl_offset.config(text=f"X: {self.tc_cx}   Y: {self.tc_cy}")
+        self._tc_render()
+
+    def _tc_release(self, _=None):
+        self.tc_drag0 = None
+
+    def _tc_wheel(self, e):
+        if self.tc_pil is None:
+            return
+        factor = 1.15 if (getattr(e, "delta", 0) > 0 or e.num == 4) else 1 / 1.15
+        ix = (e.x - self.tc_ox) / self.tc_scale
+        iy = (e.y - self.tc_oy) / self.tc_scale
+        self.tc_zoom = max(0.1, min(30.0, self.tc_zoom * factor))
+        cw = self.tc_src_cv.winfo_width() or 500
+        ch = self.tc_src_cv.winfo_height() or 500
+        iw, ih = self.tc_pil.size
+        fit = min(cw / iw, ch / ih)
+        ns  = fit * self.tc_zoom
+        self.tc_view_x = int(e.x - ix * ns - (cw - int(iw * ns)) // 2)
+        self.tc_view_y = int(e.y - iy * ns - (ch - int(ih * ns)) // 2)
+        self.tc_lbl_zoom.config(text=f"{int(self.tc_zoom * 100)}%")
+        self._tc_render_source()
+
+    def _tc_zoom_reset(self):
+        self.tc_zoom   = 1.0
+        self.tc_view_x = 0
+        self.tc_view_y = 0
+        self.tc_lbl_zoom.config(text="100%")
+        self._tc_render_source()
+
+    def _tc_pan_press(self, e):
+        self.tc_src_cv.focus_set()
+        self.tc_pan0 = (e.x, e.y, self.tc_view_x, self.tc_view_y)
+
+    def _tc_pan_drag(self, e):
+        if self.tc_pan0 is None:
+            return
+        sx, sy, vx0, vy0 = self.tc_pan0
+        self.tc_view_x = vx0 + (e.x - sx)
+        self.tc_view_y = vy0 + (e.y - sy)
+        self._tc_render_source()
+
+    def _tc_pan_release(self, _=None):
+        self.tc_pan0 = None
+
+    def _tc_render(self):
+        self._tc_render_source()
+        self._tc_render_preview()
+
+    def _tc_checker(self, w, h, cs=8):
+        img  = Image.new("RGB", (w, h))
+        draw = ImageDraw.Draw(img)
+        for r in range((h + cs - 1) // cs):
+            for c in range((w + cs - 1) // cs):
+                col = "#666666" if (r + c) % 2 == 0 else "#999999"
+                x0, y0 = c * cs, r * cs
+                draw.rectangle([x0, y0,
+                                 min(x0 + cs, w) - 1,
+                                 min(y0 + cs, h) - 1], fill=col)
+        return img
+
+    def _tc_render_source(self):
+        if self.tc_pil is None:
+            return
+        sz     = self.tc_size.get()
+        iw, ih = self.tc_pil.size
+        cw     = self.tc_src_cv.winfo_width()  or 500
+        ch     = self.tc_src_cv.winfo_height() or 500
+
+        fit    = min(cw / iw, ch / ih)
+        scale  = fit * self.tc_zoom
+        nw     = max(1, int(iw * scale))
+        nh     = max(1, int(ih * scale))
+        self.tc_scale = scale
+        self.tc_ox    = (cw - nw) // 2 + self.tc_view_x
+        self.tc_oy    = (ch - nh) // 2 + self.tc_view_y
+
+        bg     = self._tc_checker(nw, nh, cs=8)
+        scaled = self.tc_pil.resize((nw, nh), Image.LANCZOS)
+        bg.paste(scaled.convert("RGB"), mask=scaled.split()[3])
+        vis    = bg
+        draw   = ImageDraw.Draw(vis)
+
+        # Faint tile grid
+        for gx in range(0, iw + 1, sz):
+            cx = int(gx * scale)
+            if 0 <= cx <= nw:
+                draw.line([(cx, 0), (cx, nh - 1)], fill="#3a3a5e", width=1)
+        for gy in range(0, ih + 1, sz):
+            cy = int(gy * scale)
+            if 0 <= cy <= nh:
+                draw.line([(0, cy), (nw - 1, cy)], fill="#3a3a5e", width=1)
+
+        sw = max(1, self.tc_sel_w.get())
+        sh = max(1, self.tc_sel_h.get())
+        if iw >= sw and ih >= sh:
+            rx  = int(self.tc_cx * scale)
+            ry  = int(self.tc_cy * scale)
+            rw  = max(2, int(sw * scale))
+            rh  = max(2, int(sh * scale))
+            draw.rectangle([rx, ry, rx + rw - 1, ry + rh - 1],
+                            outline="#ffff00", width=2)
+            draw.rectangle([rx + 2, ry + 2, rx + rw - 3, ry + rh - 3],
+                            outline="#ff6600", width=1)
+        else:
+            draw.text((4, 4), f"Изображение меньше {sw}×{sh}", fill="#e74c3c")
+
+        self.tc_src_ph = ImageTk.PhotoImage(vis)
+        self.tc_src_cv.delete("all")
+        self.tc_src_cv.create_image(self.tc_ox, self.tc_oy,
+                                    anchor=tk.NW, image=self.tc_src_ph)
+
+    def _tc_render_preview(self):
+        if self.tc_pil is None:
+            return
+        sz     = self.tc_size.get()
+        n      = self.tc_grid.get()
+        iw, ih = self.tc_pil.size
+        cw     = self.tc_prev_cv.winfo_width()  or 500
+        ch     = self.tc_prev_cv.winfo_height() or 500
+
+        self.tc_lbl_grid.config(text=f"Превью тайла  {n} × {n}  (видны стыки)")
+
+        sw = max(1, self.tc_sel_w.get())
+        sh = max(1, self.tc_sel_h.get())
+
+        if iw < sw or ih < sh:
+            self.tc_prev_cv.delete("all")
+            self.tc_prev_cv.create_text(
+                cw // 2, ch // 2,
+                text=f"Изображение меньше\nвыбранного размера ({sw}×{sh})",
+                fill=RED, font=("Arial", 12), justify=tk.CENTER)
+            return
+
+        x    = max(0, min(self.tc_cx, iw - sw))
+        y    = max(0, min(self.tc_cy, ih - sh))
+        crop = self.tc_pil.crop((x, y, x + sw, y + sh))
+        tile = crop.resize((sz, sz), Image.LANCZOS) if (sw != sz or sh != sz) else crop
+
+        gp      = sz * n
+        checker = self._tc_checker(gp, gp, cs=max(4, sz // 8))
+        grid    = checker.convert("RGBA")
+        for row in range(n):
+            for col in range(n):
+                grid.paste(tile, (col * sz, row * sz), tile)
+
+        s      = min(cw / gp, ch / gp)
+        nw     = max(1, int(gp * s))
+        nh     = max(1, int(gp * s))
+        resamp = Image.NEAREST if sz <= 64 else Image.LANCZOS
+        disp   = grid.resize((nw, nh), resamp)
+
+        self.tc_prev_ph = ImageTk.PhotoImage(disp)
+        self.tc_prev_cv.delete("all")
+        ox = (cw - nw) // 2
+        oy = (ch - nh) // 2
+        self.tc_prev_cv.create_image(ox, oy, anchor=tk.NW, image=self.tc_prev_ph)
+
+    def tc_out_dir(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.tc_outdir = d
+            self.tc_lbl_out.config(text=d)
+            self._add_recent(d)
+
+    def tc_save(self):
+        if self.tc_pil is None or not self.tc_outdir:
+            messagebox.showwarning("Ошибка", "Выберите изображение и папку сохранения")
+            return
+        sw, sh = max(1, self.tc_sel_w.get()), max(1, self.tc_sel_h.get())
+        iw, ih = self.tc_pil.size
+        if iw < sw or ih < sh:
+            messagebox.showwarning("Ошибка",
+                                   f"Изображение меньше выбранного размера ({sw}×{sh})")
+            return
+        name   = self.tc_name.get().strip() or "tile"
+        prefix = name + "_"
+        x    = max(0, min(self.tc_cx, iw - sw))
+        y    = max(0, min(self.tc_cy, ih - sh))
+        tile = self.tc_pil.crop((x, y, x + sw, y + sh))
+        idx  = self._next_idx(self.tc_outdir, prefix)
+        out  = os.path.join(self.tc_outdir, f"{prefix}{idx:04d}.png")
+        tile.save(out)
+        messagebox.showinfo("Готово!", f"Кроп {sw}×{sh} сохранён:\n{out}")
 
     # ═══════════════════════════════════════════════════════════════
     #  ОБЩИЕ ДИАЛОГИ
