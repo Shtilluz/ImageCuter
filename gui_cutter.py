@@ -130,6 +130,23 @@ class SpriteCutterApp:
     def _sep(self, parent):
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=9)
 
+    def _help_btn(self, parent, tab_id):
+        titles = {
+            "auto":  "Авто-нарезчик",
+            "tile":  "Тайловая сетка",
+            "shape": "Вырезание фигур",
+            "mgr":   "Менеджер спрайтов",
+            "tc":    "Тайл-тест",
+        }
+        f = tk.Frame(parent, bg=BG)
+        f.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(f, text=titles.get(tab_id, ""), fg=FG, bg=BG,
+                 font=("Arial", 11, "bold")).pack(side=tk.LEFT)
+        tk.Button(f, text=" ? ", command=lambda: self._show_tab_help(tab_id),
+                  bg=ACC, fg=FG, font=("Arial", 9, "bold"), relief=tk.FLAT,
+                  cursor="hand2", padx=5, pady=1,
+                  activebackground="#5b6de8", activeforeground=FG).pack(side=tk.RIGHT)
+
     def _spinbox(self, parent, var, lo, hi, w=6, cmd=None):
         kw = dict(from_=lo, to=hi, textvariable=var, width=w, bg=BTN, fg=FG,
                   relief=tk.FLAT, highlightthickness=0, insertbackground=FG,
@@ -171,6 +188,7 @@ class SpriteCutterApp:
         sb = self._sidebar(self.t_auto)
         area = self._area(self.t_auto)
 
+        self._help_btn(sb, "auto")
         self._lbl(sb, "1. Настройка путей", bold=True).pack(anchor=tk.W, pady=(0, 8))
         self._btn(sb, "Выбрать картинки (PNG/JPG)", self.auto_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.auto_lbl_in = self._lbl(sb, "Файлы не выбраны", color=FG2)
@@ -360,6 +378,7 @@ class SpriteCutterApp:
         sb = self._sidebar(self.t_tile)
         area = self._area(self.t_tile)
 
+        self._help_btn(sb, "tile")
         self._lbl(sb, "1. Открыть тайлсет", bold=True).pack(anchor=tk.W, pady=(0, 8))
         self._btn(sb, "Открыть тайлсет (PNG/JPG)", self.tile_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.tile_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
@@ -540,6 +559,7 @@ class SpriteCutterApp:
         sb = self._sidebar(self.t_shape)
         area = self._area(self.t_shape)
 
+        self._help_btn(sb, "shape")
         self._lbl(sb, "1. Изображение", bold=True).pack(anchor=tk.W, pady=(0, 8))
         self._btn(sb, "Открыть изображение", self.shape_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.shape_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
@@ -798,6 +818,7 @@ class SpriteCutterApp:
         sb = self._sidebar(self.t_mgr)
         area = self._area(self.t_mgr)
 
+        self._help_btn(sb, "mgr")
         self._lbl(sb, "1. Загрузка спрайтов", bold=True).pack(anchor=tk.W, pady=(0, 8))
         self._btn(sb, "Папка со спрайтами", self.mgr_open_folder, GRN, h=2).pack(fill=tk.X, pady=3)
         self._btn(sb, "Добавить отдельные файлы", self.mgr_add_files).pack(fill=tk.X, pady=3)
@@ -1329,6 +1350,7 @@ class SpriteCutterApp:
         sb   = self._sidebar(self.t_tilecheck)
         area = self._area(self.t_tilecheck)
 
+        self._help_btn(sb, "tc")
         self._lbl(sb, "1. Изображение", bold=True).pack(anchor=tk.W, pady=(0, 8))
         self._btn(sb, "Открыть изображение", self.tc_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.tc_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
@@ -1738,6 +1760,196 @@ class SpriteCutterApp:
     # ═══════════════════════════════════════════════════════════════
     #  ОБЩИЕ ДИАЛОГИ
     # ═══════════════════════════════════════════════════════════════
+
+    def _gen_help_img(self, tab_id):
+        W, H = 500, 220
+        if tab_id == "auto":
+            img = Image.new("RGB", (W, H), "#1a1c24")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([8, 8, W-8, H-8], fill="#26283a", outline="#3a3c54", width=2)
+            blobs = [(38, 28, 118, 105), (135, 18, 240, 108), (258, 38, 340, 98),
+                     (48, 128, 125, 205), (148, 118, 265, 208), (288, 125, 472, 208)]
+            for x1, y1, x2, y2 in blobs:
+                draw.ellipse([x1, y1, x2, y2], fill="#b0b8c8", outline="#d0d8e8")
+                draw.rectangle([x1-4, y1-4, x2+4, y2+4], outline="#00dc50", width=2)
+            return img
+
+        elif tab_id == "tile":
+            img = Image.new("RGB", (W, H), "#1a1c24")
+            draw = ImageDraw.Draw(img)
+            T = 42
+            palette = ["#3a6a3a","#6a3a3a","#3a3a6a","#6a5a3a","#3a5a6a",
+                       "#5a3a6a","#4a6a3a","#6a4a3a","#3a6a5a","#5a5a3a"]
+            for row in range(5):
+                for col in range(11):
+                    x1, y1 = col * T + 4, row * T + 4
+                    x2, y2 = x1 + T - 3, y1 + T - 3
+                    if x2 > W-2 or y2 > H-2:
+                        continue
+                    draw.rectangle([x1, y1, x2, y2],
+                                   fill=palette[(row * 11 + col) % len(palette)],
+                                   outline="#00e050", width=1)
+            return img
+
+        elif tab_id == "shape":
+            img = Image.new("RGB", (W, H), "#1a1c24")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([14, 14, W-14, H-14], fill="#26283a")
+            draw.ellipse([50, 35, 195, 185], fill="#7878c0")
+            draw.ellipse([230, 50, 380, 185], fill="#c07878")
+            draw.ellipse([400, 60, 475, 185], fill="#78c078")
+            draw.rectangle([46, 31, 199, 189], outline="#e74c3c", width=2)
+            poly = [(230, 50), (335, 38), (385, 125), (305, 189), (218, 162)]
+            draw.polygon(poly, outline="#3498db", width=2)
+            for p in poly:
+                draw.ellipse([p[0]-3, p[1]-3, p[0]+3, p[1]+3], fill="#3498db")
+            lasso = [(400, 60), (472, 45), (480, 130), (455, 188), (398, 168), (388, 115)]
+            draw.polygon(lasso, outline="#2ecc71", width=2)
+            for p in lasso:
+                draw.ellipse([p[0]-3, p[1]-3, p[0]+3, p[1]+3], fill="#2ecc71")
+            return img
+
+        elif tab_id == "mgr":
+            img = Image.new("RGB", (W, H), "#1a1c24")
+            draw = ImageDraw.Draw(img)
+            T, PAD = 72, 10
+            cols_n = 6
+            colors = ["#c88840","#40c880","#4080c8","#c040c8","#c8c840","#40c8c8",
+                      "#886040","#408860","#804088","#408080"]
+            checked = [True, True, False, True, True, False, True, True, True, False, True, True]
+            for i in range(12):
+                col = i % cols_n
+                row = i // cols_n
+                x = PAD + col * (T + PAD)
+                y = PAD + row * (T + PAD + 14)
+                if x + T > W - 2 or y + T > H - 2:
+                    continue
+                draw.rectangle([x, y, x+T, y+T], fill=colors[i % len(colors)], outline="#555")
+                cx, cy = x+2, y+T+2
+                draw.rectangle([cx, cy, cx+10, cy+10], outline="#aaa", fill="#26283a")
+                if checked[i % len(checked)]:
+                    draw.line([(cx+2, cy+5), (cx+5, cy+8), (cx+9, cy+2)],
+                              fill="#00e050", width=2)
+            return img
+
+        elif tab_id == "tc":
+            img = Image.new("RGB", (W, H), "#1a1c24")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([8, 8, 238, H-8], fill="#26283a", outline="#3a3c54")
+            for r in range(4):
+                for c in range(4):
+                    x1, y1 = 18 + c*52, 18 + r*46
+                    h_ = (30 + r*10 + c*5) % 80 + 30
+                    s_ = (50 + r*8) % 80 + 30
+                    v_ = (40 + c*8) % 80 + 30
+                    draw.rectangle([x1, y1, x1+50, y1+44], fill=(h_, s_, v_))
+            draw.rectangle([18, 18, 70, 62], outline="#ffff00", width=2)
+            draw.rectangle([20, 20, 68, 60], outline="#ff6600", width=1)
+            draw.line([(244, 8), (244, H-8)], fill="#4f545c", width=2)
+            draw.rectangle([250, 8, W-8, H-8], fill="#26283a", outline="#3a3c54")
+            SZ = 60
+            for r in range(3):
+                for c in range(3):
+                    x1, y1 = 254 + c*SZ, 12 + r*SZ
+                    for cr in range(4):
+                        for cc in range(4):
+                            tc = "#505050" if (cr+cc) % 2 == 0 else "#707070"
+                            draw.rectangle([x1+cc*15, y1+cr*15,
+                                            x1+cc*15+14, y1+cr*15+14], fill=tc)
+                    draw.rectangle([x1, y1, x1+SZ-1, y1+SZ-1], fill=(50,100,50,), outline="#3a3c54")
+            return img
+
+        return Image.new("RGB", (W, H), BG)
+
+    def _show_tab_help(self, tab_id):
+        descriptions = {
+            "auto": (
+                "Авто-нарезчик",
+                "Автоматически находит объекты на изображении по цвету фона.\n\n"
+                "• Работает с белым, чёрным фоном и PNG с прозрачностью\n"
+                "• Порог — чувствительность определения фона (200–255)\n"
+                "• Мин. размер — отфильтровывает мелкий шум\n"
+                "• Отступ — добавляет рамку вокруг каждого спрайта\n"
+                "• Зелёные рамки на превью — найденные объекты\n"
+                "• Кнопка «Разделить и сохранить» обрабатывает все файлы сразу"
+            ),
+            "tile": (
+                "Тайловая сетка",
+                "Нарезает изображение по равномерной сетке тайлов.\n\n"
+                "• Режим «По размеру» — задаёте ширину и высоту одного тайла\n"
+                "• Режим «По количеству» — задаёте число строк и столбцов\n"
+                "• Отступ — сдвиг сетки от края изображения\n"
+                "• Зазор — расстояние между тайлами (для атласов с padding)\n"
+                "• «Пропускать пустые» — не сохраняет прозрачные тайлы\n"
+                "• Зелёные рамки = сохранятся, серые = пропустятся"
+            ),
+            "shape": (
+                "Вырезание фигур",
+                "Вырезает произвольные области вручную.\n\n"
+                "• Прямоугольник — зажмите ЛКМ и тяните мышью\n"
+                "• Многоугольник — кликайте по точкам, ПКМ для закрытия\n"
+                "• Лассо — рисуйте произвольный контур, ПКМ для закрытия\n"
+                "• Esc — сбросить текущий незаконченный контур\n"
+                "• Можно создать несколько выделений и сохранить все сразу\n"
+                "• «Прозрачный фон» — фон вне фигуры станет прозрачным"
+            ),
+            "mgr": (
+                "Менеджер спрайтов",
+                "Собирает отдельные PNG-файлы в один спрайт-лист.\n\n"
+                "• Загрузите целую папку или отдельные файлы\n"
+                "• Ставьте/снимайте галочки для выбора нужных спрайтов\n"
+                "• Фильтр по мин. размеру — авто-снимает галочки с мелких\n"
+                "• «Инверт.» — меняет выбор на противоположный\n"
+                "• Столбцов — ширина итоговой таблицы спрайт-листа\n"
+                "• «Единый размер» — все ячейки одного размера (по максимуму)"
+            ),
+            "tc": (
+                "Тайл-тест",
+                "Проверяет, насколько тайл выглядит «бесшовно» при мозаичном заполнении.\n\n"
+                "• Левая панель — исходное изображение с выбором области\n"
+                "• Правая панель — выбранный тайл повторяется N×N раз\n"
+                "• Тяните мышью для перемещения области среза\n"
+                "• Стрелки (±1 пикс) и Shift+стрелки (±10 пикс) для точного выравнивания\n"
+                "• Колёсико + средняя кнопка — зум и перемещение по исходнику\n"
+                "• «Привязка к сетке» — фиксирует позицию по шагу тайла"
+            ),
+        }
+
+        title, text = descriptions.get(tab_id, ("Справка", "Нет описания."))
+
+        top = tk.Toplevel(self.root)
+        top.title(f"Справка — {title}")
+        top.configure(bg=BG)
+        top.resizable(False, False)
+        top.transient(self.root)
+        top.grab_set()
+
+        pil_img = self._gen_help_img(tab_id)
+        photo = ImageTk.PhotoImage(pil_img)
+        top._photo = photo
+
+        img_lbl = tk.Label(top, image=photo, bg="#1a1c24", bd=0)
+        img_lbl.pack(padx=0, pady=0)
+
+        tk.Frame(top, bg=ACC, height=2).pack(fill=tk.X)
+
+        txt_frame = tk.Frame(top, bg=BG2, padx=18, pady=14)
+        txt_frame.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(txt_frame, text=title, fg=ACC, bg=BG2,
+                 font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(0, 8))
+        tk.Label(txt_frame, text=text, fg=FG, bg=BG2,
+                 font=("Arial", 10), justify=tk.LEFT, anchor=tk.W).pack(anchor=tk.W)
+
+        tk.Button(top, text="Закрыть", command=top.destroy,
+                  bg=BTN, fg=FG, font=("Arial", 10, "bold"), relief=tk.FLAT,
+                  cursor="hand2", padx=20, pady=6,
+                  activebackground=ACC, activeforeground=FG).pack(pady=12)
+
+        top.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()  - top.winfo_width())  // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - top.winfo_height()) // 2
+        top.geometry(f"+{x}+{y}")
 
     def _show_help(self):
         messagebox.showinfo("Инструкция", (
