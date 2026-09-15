@@ -136,6 +136,7 @@ class SpriteCutterApp:
             "tile":  "Тайловая сетка",
             "shape": "Вырезание фигур",
             "mgr":   "Менеджер спрайтов",
+            "atlas": "Сборка атласа",
             "tc":    "Тайл-тест",
         }
         f = tk.Frame(parent, bg=BG)
@@ -1072,6 +1073,7 @@ class SpriteCutterApp:
         sb = self._sidebar(self.t_atlas)
         area = self._area(self.t_atlas)
 
+        self._help_btn(sb, "atlas")
         self._lbl(sb, "1. Изображение", bold=True).pack(anchor=tk.W, pady=(0, 8))
         self._btn(sb, "Открыть картинку (без фона)", self.atlas_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.atlas_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
@@ -1859,6 +1861,36 @@ class SpriteCutterApp:
                     draw.rectangle([x1, y1, x1+SZ-1, y1+SZ-1], fill=(50,100,50,), outline="#3a3c54")
             return img
 
+        elif tab_id == "atlas":
+            img = Image.new("RGB", (W, H), "#1a1c24")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([8, 8, W-8, H-8], fill="#26283a", outline="#3a3c54", width=2)
+            blobs = [(38, 28, 118, 105), (135, 18, 240, 108), (258, 38, 340, 98),
+                     (48, 128, 125, 205), (148, 118, 265, 208), (288, 125, 472, 208)]
+            for x1, y1, x2, y2 in blobs:
+                draw.ellipse([x1, y1, x2, y2], fill="#b0b8c8", outline="#d0d8e8")
+            CELL = 76
+            cols_a, rows_a = 6, 3
+            ox = (W - cols_a * CELL) // 2
+            oy = (H - rows_a * CELL) // 2
+            for r in range(rows_a):
+                for c in range(cols_a):
+                    x1 = ox + c * CELL
+                    y1 = oy + r * CELL
+                    draw.rectangle([x1, y1, x1+CELL-1, y1+CELL-1],
+                                   fill="#2e3040", outline="#00e050", width=1)
+                    idx = r * cols_a + c
+                    if idx < len(blobs):
+                        bx1, by1, bx2, by2 = blobs[idx]
+                        bw, bh = bx2 - bx1, by2 - by1
+                        scale = min((CELL - 8) / bw, (CELL - 8) / bh)
+                        nw = max(1, int(bw * scale))
+                        nh = max(1, int(bh * scale))
+                        ex = x1 + (CELL - nw) // 2
+                        ey = y1 + (CELL - nh) // 2
+                        draw.ellipse([ex, ey, ex+nw, ey+nh], fill="#b0b8c8")
+            return img
+
         return Image.new("RGB", (W, H), BG)
 
     def _show_tab_help(self, tab_id):
@@ -1902,6 +1934,16 @@ class SpriteCutterApp:
                 "• «Инверт.» — меняет выбор на противоположный\n"
                 "• Столбцов — ширина итоговой таблицы спрайт-листа\n"
                 "• «Единый размер» — все ячейки одного размера (по максимуму)"
+            ),
+            "atlas": (
+                "Сборка атласа",
+                "Автоматически находит объекты, выравнивает их в ячейки\nи собирает компактный атлас без зазоров.\n\n"
+                "• Откройте картинку с несколькими объектами на фоне\n"
+                "• Порог и мин. размер — как в Авто-нарезчике\n"
+                "• Размер ячейки — все объекты вписываются в квадрат N×N\n"
+                "• Масштабирование — большие объекты уменьшаются под ячейку\n"
+                "• «Не увеличивать мелкие» — мелкие объекты не растягиваются\n"
+                "• Атлас кратен размеру ячейки (удобно для движков и тайлмапов)"
             ),
             "tc": (
                 "Тайл-тест",
