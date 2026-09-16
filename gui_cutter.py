@@ -27,6 +27,7 @@ Sprite Manufacturer v2
 import cv2
 import numpy as np
 import os
+import base64
 import io
 import json
 import tempfile
@@ -1262,6 +1263,14 @@ class SpriteManufacturerApp:
         area = self._area(self.t_atlas)
 
         self._help_btn(sb, "atlas")
+
+        pf = tk.Frame(sb, bg=BG); pf.pack(fill=tk.X, pady=(0, 6))
+        self._btn(pf, "📂  Открыть проект", self.project_load, BTN,
+                  font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        self._btn(pf, "💾  Сохранить проект", self.project_save, BTN,
+                  font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        self._sep(sb)
+
         self._lbl(sb, "1. Изображение", bold=True).pack(anchor=tk.W, pady=(0, 8))
         self._btn(sb, "Открыть картинку (без фона)", self.atlas_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.atlas_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
@@ -1753,6 +1762,111 @@ class SpriteManufacturerApp:
         self.atlas_view_y = 0
         self.atlas_lbl_zoom.config(text="100%")
         self._atlas_render_canvas()
+
+    def project_save(self):
+        path = filedialog.asksaveasfilename(
+            title="Сохранить проект",
+            defaultextension=".smproj",
+            filetypes=[("Sprite Manufacturer Project", "*.smproj"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        data = {
+            "version": 1,
+            "source_path": self.atlas_src_path or "",
+            "outdir": self.atlas_outdir,
+            "last_out": self._atlas_last_out or "",
+            "settings": {
+                "thresh":        self.atlas_thresh.get(),
+                "min_size":      self.atlas_min.get(),
+                "sep":           self.atlas_sep.get(),
+                "cell":          self.atlas_cell.get(),
+                "fit_mode":      self.atlas_fit_mode.get(),
+                "no_upscale":    self.atlas_no_upscale.get(),
+                "align_w":       self.atlas_align_w.get(),
+                "align_h":       self.atlas_align_h.get(),
+                "dedup":         self.atlas_dedup.get(),
+                "dedup_thresh":  self.atlas_dedup_thresh.get(),
+                "cols":          self.atlas_cols.get(),
+                "atlas_name":    self.atlas_name.get(),
+            },
+        }
+
+        # Вшиваем изображение как base64 (PNG) — fallback если файл переедет
+        if self.atlas_img is not None:
+            buf = io.BytesIO()
+            self._cv2pil(self.atlas_img).save(buf, format="PNG")
+            data["source_data"] = base64.b64encode(buf.getvalue()).decode()
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        messagebox.showinfo("Проект сохранён", f"Сохранено:\n{path}")
+
+    def project_load(self):
+        path = filedialog.askopenfilename(
+            title="Открыть проект",
+            filetypes=[("Sprite Manufacturer Project", "*.smproj"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось прочитать файл проекта:\n{e}")
+            return
+
+        # Загружаем изображение: сначала по пути, потом из вшитых данных
+        img = None
+        src_path = data.get("source_path", "")
+        if src_path and os.path.exists(src_path):
+            img = cv2.imread(src_path, cv2.IMREAD_UNCHANGED)
+
+        if img is None and "source_data" in data:
+            raw = base64.b64decode(data["source_data"])
+            arr = np.frombuffer(raw, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+            if not src_path:
+                src_path = "(встроено в проект)"
+
+        # Восстанавливаем настройки
+        s = data.get("settings", {})
+        self.atlas_thresh.set(s.get("thresh",       245))
+        self.atlas_min.set(   s.get("min_size",      12))
+        self.atlas_sep.set(   s.get("sep",            0))
+        self.atlas_cell.set(  s.get("cell",          64))
+        self.atlas_fit_mode.set(s.get("fit_mode", "trim"))
+        self.atlas_no_upscale.set(s.get("no_upscale", True))
+        self.atlas_align_w.set(   s.get("align_w",   True))
+        self.atlas_align_h.set(   s.get("align_h",   True))
+        self.atlas_dedup.set(     s.get("dedup",     False))
+        self.atlas_dedup_thresh.set(s.get("dedup_thresh", 95))
+        self.atlas_cols.set(  s.get("cols",            8))
+        self.atlas_name.set(  s.get("atlas_name", "atlas"))
+        self._atlas_name_manual = True
+        self._atlas_mode_changed()   # обновляет состояние кнопки no_upscale
+
+        self.atlas_outdir = data.get("outdir", "")
+        self.atlas_lbl_out.config(
+            text=os.path.basename(self.atlas_outdir) or self.atlas_outdir
+                 if self.atlas_outdir else "Папка не выбрана"
+        )
+        last_out = data.get("last_out", "")
+        self._atlas_last_out = last_out if last_out else None
+        if self._atlas_last_out:
+            self.atlas_btn_overwrite.config(state=tk.NORMAL)
+
+        if img is not None:
+            self.atlas_img      = img
+            self.atlas_src_path = src_path
+            self.atlas_lbl_file.config(text=os.path.basename(src_path))
+            self._atlas_update()
+
+        # Переключаемся на вкладку атласа
+        self.notebook.select(self.t_atlas)
 
     def atlas_save(self):
         if self.atlas_img is None or not self.atlas_outdir:
