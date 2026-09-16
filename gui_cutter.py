@@ -1313,15 +1313,22 @@ class SpriteManufacturerApp:
         self._spinbox(cf, self.atlas_cell, 4, 2048, cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
         self.atlas_cell.trace_add("write", lambda *_: self._atlas_update())
 
-        self.atlas_scale_fit = tk.BooleanVar(value=True)
-        tk.Checkbutton(sb, text="Масштабировать объект под ячейку", variable=self.atlas_scale_fit,
+        self._lbl(sb, "Режим подгонки спрайтов:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
+        self.atlas_fit_mode = tk.StringVar(value="trim")
+        mf = tk.Frame(sb, bg=BG); mf.pack(fill=tk.X)
+        tk.Radiobutton(mf, text="Обрезка",         variable=self.atlas_fit_mode, value="trim",
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                       command=self._atlas_update).pack(anchor=tk.W, pady=(4, 0))
+                       command=self._atlas_mode_changed).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Radiobutton(mf, text="Масштабирование", variable=self.atlas_fit_mode, value="scale",
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_mode_changed).pack(side=tk.LEFT)
 
         self.atlas_no_upscale = tk.BooleanVar(value=True)
-        tk.Checkbutton(sb, text="Не увеличивать мелкие объекты", variable=self.atlas_no_upscale,
+        self.atlas_chk_noup = tk.Checkbutton(sb, text="Не увеличивать мелкие объекты",
+                       variable=self.atlas_no_upscale,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                       command=self._atlas_update).pack(anchor=tk.W)
+                       command=self._atlas_update)
+        self.atlas_chk_noup.pack(anchor=tk.W, pady=(2, 0))
 
         self._lbl(sb, "Выравнивание спрайтов:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
         alf = tk.Frame(sb, bg=BG); alf.pack(fill=tk.X)
@@ -1333,12 +1340,6 @@ class SpriteManufacturerApp:
         tk.Checkbutton(alf, text="По высоте", variable=self.atlas_align_h,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(side=tk.LEFT)
-
-        self.atlas_trim = tk.BooleanVar(value=True)
-        tk.Checkbutton(sb, text="Авто-обрезка краёв (убрать фон до контента)",
-                       variable=self.atlas_trim,
-                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                       command=self._atlas_update).pack(anchor=tk.W, pady=(4, 0))
 
         self._sep(sb)
         self._lbl(sb, "4. Компоновка атласа", bold=True).pack(anchor=tk.W, pady=(0, 5))
@@ -1468,6 +1469,12 @@ class SpriteManufacturerApp:
         self.atlas_cell.set(v)
         self._atlas_update()
 
+    def _atlas_mode_changed(self):
+        mode = self.atlas_fit_mode.get()
+        state = tk.NORMAL if mode == "scale" else tk.DISABLED
+        self.atlas_chk_noup.config(state=state)
+        self._atlas_update()
+
     def _trim_crop(self, pil, tv, dark_bg, has_alpha):
         """Обрезает фоновые/прозрачные пиксели вокруг спрайта до плотного bbox контента."""
         arr = np.array(pil)
@@ -1499,17 +1506,15 @@ class SpriteManufacturerApp:
         contours = self._auto_contours(img, tv, ms, sep=sep)
         if not contours: return None, 0, cell0, cell0, 0, 0
 
-        cols      = max(1, self.atlas_cols.get())
-        fit       = self.atlas_scale_fit.get()
-        no_up     = self.atlas_no_upscale.get()
-        norm_w    = self.atlas_align_w.get()
-        norm_h    = self.atlas_align_h.get()
-        do_trim   = self.atlas_trim.get()
+        cols   = max(1, self.atlas_cols.get())
+        mode   = self.atlas_fit_mode.get()   # "trim" | "scale"
+        no_up  = self.atlas_no_upscale.get()
+        norm_w = self.atlas_align_w.get()
+        norm_h = self.atlas_align_h.get()
 
         has_alpha = len(img.shape) == 3 and img.shape[2] == 4
         if not has_alpha and len(img.shape) == 3:
-            gray_corner = int(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)[0, 0])
-            dark_bg = gray_corner < 127
+            dark_bg = int(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)[0, 0]) < 127
         else:
             dark_bg = False
 
@@ -1519,25 +1524,23 @@ class SpriteManufacturerApp:
         boxes = [cv2.boundingRect(c) for c in contours]
         boxes.sort(key=lambda b: (b[1] // max(1, cell0), b[0]))
 
-        # 1-й проход: собираем исходные PIL-кропы (с обрезкой фона если нужно)
+        # 1-й проход: кроп + trim (в режиме "обрезка" или всегда перед scale)
         raws = []
         for (x, y, w, h) in boxes:
-            crop = rgba[y:y+h, x:x+w]
-            pil  = self._cv2pil(crop).convert("RGBA")
-            if do_trim:
-                pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
+            pil = self._cv2pil(rgba[y:y+h, x:x+w]).convert("RGBA")
+            pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
             raws.append(pil)
 
-        # Определяем размер ячейки
+        # Определяем размер ячейки по триммированным спрайтам
         max_w = max(p.width  for p in raws)
         max_h = max(p.height for p in raws)
         cell_w = cell0 if norm_w else max_w
         cell_h = cell0 if norm_h else max_h
 
-        # 2-й проход: масштабируем спрайты
+        # 2-й проход: масштабирование (только в режиме "scale")
         tiles = []
         for pil in raws:
-            if fit:
+            if mode == "scale":
                 if norm_w and norm_h:
                     scale = min(cell_w / pil.width, cell_h / pil.height)
                 elif norm_w:
@@ -1553,7 +1556,7 @@ class SpriteManufacturerApp:
                     nh = max(1, round(pil.height * scale))
                     pil = pil.resize((nw, nh), Image.LANCZOS)
             else:
-                # Без масштабирования — только обрезка если больше ячейки
+                # trim-режим: натуральный размер, обрезать если больше ячейки
                 if pil.width > cell_w or pil.height > cell_h:
                     l = max(0, (pil.width  - cell_w) // 2)
                     t = max(0, (pil.height - cell_h) // 2)
@@ -2355,11 +2358,11 @@ class SpriteManufacturerApp:
         self.atlas_min.set(12)
         self.atlas_sep.set(0)
         self.atlas_cell.set(64)
-        self.atlas_scale_fit.set(True)
+        self.atlas_fit_mode.set("trim")
         self.atlas_no_upscale.set(True)
+        self.atlas_chk_noup.config(state=tk.DISABLED)
         self.atlas_align_w.set(True)
         self.atlas_align_h.set(True)
-        self.atlas_trim.set(True)
         self.atlas_cols.set(8)
         self.atlas_name.set("atlas")
         self._atlas_name_manual = False
