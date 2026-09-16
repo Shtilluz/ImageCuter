@@ -1334,6 +1334,12 @@ class SpriteManufacturerApp:
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(side=tk.LEFT)
 
+        self.atlas_trim = tk.BooleanVar(value=True)
+        tk.Checkbutton(sb, text="Авто-обрезка краёв (убрать фон до контента)",
+                       variable=self.atlas_trim,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_update).pack(anchor=tk.W, pady=(4, 0))
+
         self._sep(sb)
         self._lbl(sb, "4. Компоновка атласа", bold=True).pack(anchor=tk.W, pady=(0, 5))
 
@@ -1462,6 +1468,25 @@ class SpriteManufacturerApp:
         self.atlas_cell.set(v)
         self._atlas_update()
 
+    def _trim_crop(self, pil, tv, dark_bg, has_alpha):
+        """Обрезает фоновые/прозрачные пиксели вокруг спрайта до плотного bbox контента."""
+        arr = np.array(pil)
+        if has_alpha:
+            mask = arr[:, :, 3] > 10
+        else:
+            gray = np.mean(arr[:, :, :3], axis=2).astype(np.uint8)
+            if dark_bg:
+                mask = gray > (255 - tv)
+            else:
+                mask = gray < tv
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+        if not rows.any() or not cols.any():
+            return pil
+        rmin, rmax = int(np.where(rows)[0][0]),  int(np.where(rows)[0][-1])
+        cmin, cmax = int(np.where(cols)[0][0]),  int(np.where(cols)[0][-1])
+        return pil.crop((cmin, rmin, cmax + 1, rmax + 1))
+
     def _atlas_build(self):
         """Находит объекты и собирает атлас.
         Возвращает (PIL RGBA, кол-во, cell_w, cell_h, cols, rows) или (None, 0, ...) если пусто."""
@@ -1474,11 +1499,19 @@ class SpriteManufacturerApp:
         contours = self._auto_contours(img, tv, ms, sep=sep)
         if not contours: return None, 0, cell0, cell0, 0, 0
 
-        cols   = max(1, self.atlas_cols.get())
-        fit    = self.atlas_scale_fit.get()
-        no_up  = self.atlas_no_upscale.get()
-        norm_w = self.atlas_align_w.get()
-        norm_h = self.atlas_align_h.get()
+        cols      = max(1, self.atlas_cols.get())
+        fit       = self.atlas_scale_fit.get()
+        no_up     = self.atlas_no_upscale.get()
+        norm_w    = self.atlas_align_w.get()
+        norm_h    = self.atlas_align_h.get()
+        do_trim   = self.atlas_trim.get()
+
+        has_alpha = len(img.shape) == 3 and img.shape[2] == 4
+        if not has_alpha and len(img.shape) == 3:
+            gray_corner = int(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)[0, 0])
+            dark_bg = gray_corner < 127
+        else:
+            dark_bg = False
 
         rgba = (cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
                 if len(img.shape) == 3 and img.shape[2] == 3 else img.copy())
@@ -1486,11 +1519,14 @@ class SpriteManufacturerApp:
         boxes = [cv2.boundingRect(c) for c in contours]
         boxes.sort(key=lambda b: (b[1] // max(1, cell0), b[0]))
 
-        # 1-й проход: собираем исходные PIL-кропы
+        # 1-й проход: собираем исходные PIL-кропы (с обрезкой фона если нужно)
         raws = []
         for (x, y, w, h) in boxes:
             crop = rgba[y:y+h, x:x+w]
-            raws.append(self._cv2pil(crop).convert("RGBA"))
+            pil  = self._cv2pil(crop).convert("RGBA")
+            if do_trim:
+                pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
+            raws.append(pil)
 
         # Определяем размер ячейки
         max_w = max(p.width  for p in raws)
@@ -2323,6 +2359,7 @@ class SpriteManufacturerApp:
         self.atlas_no_upscale.set(True)
         self.atlas_align_w.set(True)
         self.atlas_align_h.set(True)
+        self.atlas_trim.set(True)
         self.atlas_cols.set(8)
         self.atlas_name.set("atlas")
         self._atlas_name_manual = False
