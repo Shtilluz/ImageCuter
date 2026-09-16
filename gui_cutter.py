@@ -1,5 +1,5 @@
 """
-ИИ Разделитель Спрайтов v2
+Sprite Manufacturer v2
 Автор: Shtillgor (https://midgro.uz/)
 
 Инструмент для автоматической нарезки спрайтов, тайлов и атласов из растровых изображений.
@@ -49,10 +49,10 @@ FG   = "white"
 FG2  = "#b9bbbe"
 
 
-class SpriteCutterApp:
+class SpriteManufacturerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("ИИ Разделитель Спрайтов v2")
+        self.root.title("Sprite Manufacturer v2")
         self.root.geometry("1200x850")
         self.root.minsize(960, 680)
         self.root.configure(bg=BG)
@@ -2642,6 +2642,6 @@ class SpriteCutterApp:
 
 if __name__ == "__main__":
     root = TkinterDnD.Tk()
-    app = SpriteCutterApp(root)
+    app = SpriteManufacturerApp(root)
     root.update()
     root.mainloop()
