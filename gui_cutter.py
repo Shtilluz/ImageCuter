@@ -130,11 +130,58 @@ class SpriteManufacturerApp:
         self.recent_dirs = self.recent_dirs[:8]
         self._save_config()
 
-    def _sidebar(self, parent):
-        sb = tk.Frame(parent, width=305, bg=BG, padx=10, pady=10)
-        sb.pack(side=tk.LEFT, fill=tk.Y)
-        sb.pack_propagate(False)
-        return sb
+    def _sidebar(self, parent, scrollable=False):
+        if not scrollable:
+            sb = tk.Frame(parent, width=305, bg=BG, padx=10, pady=10)
+            sb.pack(side=tk.LEFT, fill=tk.Y)
+            sb.pack_propagate(False)
+            return sb
+        # Прокручиваемый sidebar
+        outer = tk.Frame(parent, width=315, bg=BG)
+        outer.pack(side=tk.LEFT, fill=tk.Y)
+        outer.pack_propagate(False)
+        vsb = ttk.Scrollbar(outer, orient=tk.VERTICAL)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0,
+                           yscrollcommand=vsb.set, width=295)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.config(command=canvas.yview)
+        inner = tk.Frame(canvas, bg=BG, padx=10, pady=8)
+        win_id = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        def _on_resize(e):
+            canvas.itemconfig(win_id, width=e.width)
+        canvas.bind("<Configure>", _on_resize)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        def _scroll(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _scroll)
+        return inner
+
+    def _section(self, parent, title, expanded=True):
+        """Сворачиваемая секция. Возвращает фрейм контента."""
+        hdr = tk.Frame(parent, bg=BTN, cursor="hand2")
+        hdr.pack(fill=tk.X, pady=(5, 0))
+        state = [expanded]
+        arrow = tk.Label(hdr, text="▼" if expanded else "▶",
+                         bg=BTN, fg=GOLD, font=("Arial", 9, "bold"), width=2)
+        arrow.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(hdr, text=title, bg=BTN, fg=FG,
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT, pady=5)
+        body = tk.Frame(parent, bg=BG)
+        if expanded:
+            body.pack(fill=tk.X, pady=(2, 4))
+        def _toggle(_=None):
+            state[0] = not state[0]
+            arrow.config(text="▼" if state[0] else "▶")
+            if state[0]:
+                body.pack(fill=tk.X, pady=(2, 4))
+            else:
+                body.pack_forget()
+        for w in (hdr, arrow) + tuple(hdr.winfo_children()):
+            w.bind("<Button-1>", _toggle)
+        hdr.bind("<Button-1>", _toggle)
+        return body
 
     def _area(self, parent):
         a = tk.Frame(parent, bg=BG2)
@@ -1259,88 +1306,119 @@ class SpriteManufacturerApp:
     # ═══════════════════════════════════════════════════════════════
 
     def _build_atlas(self):
-        sb = self._sidebar(self.t_atlas)
+        # Боковая панель — прокручиваемая
+        sb_outer = tk.Frame(self.t_atlas, width=315, bg=BG)
+        sb_outer.pack(side=tk.LEFT, fill=tk.Y)
+        sb_outer.pack_propagate(False)
+
+        # Кнопки сохранения — всегда внизу, вне скролла
+        btm_save = tk.Frame(sb_outer, bg=BG, padx=8, pady=6)
+        btm_save.pack(side=tk.BOTTOM, fill=tk.X)
+        self.atlas_btn_save = self._btn(btm_save, "СОБРАТЬ И СОХРАНИТЬ АТЛАС",
+                                        self.atlas_save, ACC, h=2, state=tk.DISABLED)
+        self.atlas_btn_save.pack(fill=tk.X, pady=(0, 4))
+        self.atlas_btn_overwrite = self._btn(btm_save, "↺  Перезаписать текущий файл",
+                                             self.atlas_overwrite, GOLD, state=tk.DISABLED)
+        self.atlas_btn_overwrite.pack(fill=tk.X)
+        ttk.Separator(sb_outer, orient="horizontal").pack(fill=tk.X)
+
+        # Скроллируемый контент
+        vsb = ttk.Scrollbar(sb_outer, orient=tk.VERTICAL)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        sc = tk.Canvas(sb_outer, bg=BG, highlightthickness=0,
+                       yscrollcommand=vsb.set)
+        sc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.config(command=sc.yview)
+        sb = tk.Frame(sc, bg=BG, padx=8, pady=6)
+        _wid = sc.create_window((0, 0), window=sb, anchor=tk.NW)
+        sc.bind("<Configure>", lambda e: sc.itemconfig(_wid, width=e.width))
+        sb.bind("<Configure>", lambda e: sc.configure(scrollregion=sc.bbox("all")))
+        def _sb_scroll(e):
+            sc.yview_scroll(int(-1 * (e.delta / 120 if e.delta else
+                                      (-1 if e.num == 4 else 1))), "units")
+        sc.bind("<MouseWheel>", _sb_scroll)
+        sc.bind("<Button-4>",   _sb_scroll)
+        sc.bind("<Button-5>",   _sb_scroll)
+
         area = self._area(self.t_atlas)
 
+        # ── Заголовок + проект ──────────────────────────────────────
         self._help_btn(sb, "atlas")
-
-        pf = tk.Frame(sb, bg=BG); pf.pack(fill=tk.X, pady=(0, 6))
-        self._btn(pf, "📂  Открыть проект", self.project_load, BTN,
+        pf = tk.Frame(sb, bg=BG); pf.pack(fill=tk.X, pady=(0, 4))
+        self._btn(pf, "📂 Открыть проект", self.project_load, BTN,
                   font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        self._btn(pf, "💾  Сохранить проект", self.project_save, BTN,
+        self._btn(pf, "💾 Сохранить проект", self.project_save, BTN,
                   font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-        self._sep(sb)
 
-        self._lbl(sb, "1. Изображение", bold=True).pack(anchor=tk.W, pady=(0, 8))
-        self._btn(sb, "Открыть картинку (без фона)", self.atlas_open, GRN, h=2).pack(fill=tk.X, pady=3)
-        self.atlas_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
+        # ── 1. Изображение ──────────────────────────────────────────
+        s1 = self._section(sb, "1. Изображение", expanded=True)
+        self._btn(s1, "Открыть картинку (без фона)", self.atlas_open, GRN, h=2).pack(fill=tk.X, pady=3)
+        self.atlas_lbl_file = self._lbl(s1, "Файл не выбран", color=FG2)
         self.atlas_lbl_file.pack(anchor=tk.W)
-        row_pc = tk.Frame(sb, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
-        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_atlas, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
-        self._btn(row_pc, "Очистить",         self.atlas_clear,  RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
+        row_pc = tk.Frame(s1, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
+        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_atlas, BTN,
+                  font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
+        self._btn(row_pc, "Очистить", self.atlas_clear, RED,
+                  font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
 
-        self._sep(sb)
-        self._lbl(sb, "2. Поиск объектов", bold=True).pack(anchor=tk.W, pady=(0, 5))
-
-        self._lbl(sb, "Порог фона (200–255):").pack(anchor=tk.W)
-        self.atlas_thresh = tk.Scale(sb, from_=200, to=255, orient=tk.HORIZONTAL,
+        # ── 2. Поиск объектов ────────────────────────────────────────
+        s2 = self._section(sb, "2. Поиск объектов", expanded=True)
+        self._lbl(s2, "Порог фона (200–255):").pack(anchor=tk.W)
+        self.atlas_thresh = tk.Scale(s2, from_=200, to=255, orient=tk.HORIZONTAL,
                                      bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self.atlas_thresh.set(245)
         self.atlas_thresh.pack(fill=tk.X)
         self.atlas_thresh.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
 
-        self._lbl(sb, "Мин. размер объекта (пикс):").pack(anchor=tk.W, pady=(8, 0))
-        self.atlas_min = tk.Scale(sb, from_=5, to=150, orient=tk.HORIZONTAL,
+        self._lbl(s2, "Мин. размер объекта (пикс):").pack(anchor=tk.W, pady=(8, 0))
+        self.atlas_min = tk.Scale(s2, from_=5, to=150, orient=tk.HORIZONTAL,
                                   bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self.atlas_min.set(12)
         self.atlas_min.pack(fill=tk.X)
         self.atlas_min.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
 
-        self._lbl(sb, "Разделение объектов (эрозия, пикс):").pack(anchor=tk.W, pady=(8, 0))
-        self.atlas_sep = tk.Scale(sb, from_=0, to=150, orient=tk.HORIZONTAL,
+        self._lbl(s2, "Разделение объектов (эрозия, пикс):").pack(anchor=tk.W, pady=(8, 0))
+        self.atlas_sep = tk.Scale(s2, from_=0, to=150, orient=tk.HORIZONTAL,
                                   bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self.atlas_sep.set(0)
         self.atlas_sep.pack(fill=tk.X)
         self.atlas_sep.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
 
-        self.atlas_lbl_cnt = self._lbl(sb, "Найдено объектов: 0", color=GOLD, bold=True)
-        self.atlas_lbl_cnt.pack(anchor=tk.W, pady=6)
+        self.atlas_lbl_cnt = self._lbl(s2, "Найдено объектов: 0", color=GOLD, bold=True)
+        self.atlas_lbl_cnt.pack(anchor=tk.W, pady=(6, 0))
 
-        self._sep(sb)
-        self._lbl(sb, "3. Размер одного объекта", bold=True).pack(anchor=tk.W, pady=(0, 5))
-
-        pf = tk.Frame(sb, bg=BG)
-        pf.pack(fill=tk.X, pady=2)
+        # ── 3. Размер и подгонка ─────────────────────────────────────
+        s3 = self._section(sb, "3. Размер и подгонка", expanded=True)
+        pf3 = tk.Frame(s3, bg=BG); pf3.pack(fill=tk.X, pady=(0, 4))
         for val in (16, 32, 64, 128, 256):
-            self._btn(pf, str(val), lambda v=val: self._atlas_preset(v),
+            self._btn(pf3, str(val), lambda v=val: self._atlas_preset(v),
                       font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
 
-        cf = tk.Frame(sb, bg=BG)
-        cf.pack(fill=tk.X, pady=(6, 2))
+        cf = tk.Frame(s3, bg=BG); cf.pack(fill=tk.X, pady=(2, 4))
         self._lbl(cf, "Ячейка (пикс):").pack(side=tk.LEFT)
         self.atlas_cell = tk.IntVar(value=64)
         self._spinbox(cf, self.atlas_cell, 4, 2048, cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
         self.atlas_cell.trace_add("write", lambda *_: self._atlas_update())
 
-        self._lbl(sb, "Режим подгонки спрайтов:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
+        self._lbl(s3, "Режим подгонки:", color=FG2).pack(anchor=tk.W, pady=(2, 2))
         self.atlas_fit_mode = tk.StringVar(value="trim")
-        mf = tk.Frame(sb, bg=BG); mf.pack(fill=tk.X)
-        tk.Radiobutton(mf, text="Обрезка",         variable=self.atlas_fit_mode, value="trim",
+        mf = tk.Frame(s3, bg=BG); mf.pack(fill=tk.X)
+        tk.Radiobutton(mf, text="Обрезка", variable=self.atlas_fit_mode, value="trim",
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                       command=self._atlas_mode_changed).pack(side=tk.LEFT, padx=(0, 12))
+                       command=self._atlas_mode_changed).pack(side=tk.LEFT, padx=(0, 8))
         tk.Radiobutton(mf, text="Масштабирование", variable=self.atlas_fit_mode, value="scale",
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_mode_changed).pack(side=tk.LEFT)
 
         self.atlas_no_upscale = tk.BooleanVar(value=True)
-        self.atlas_chk_noup = tk.Checkbutton(sb, text="Не увеличивать мелкие объекты",
-                       variable=self.atlas_no_upscale,
-                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+        self.atlas_chk_noup = tk.Checkbutton(s3, text="Не увеличивать мелкие объекты",
+                       variable=self.atlas_no_upscale, bg=BG, fg=FG,
+                       selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update)
         self.atlas_chk_noup.pack(anchor=tk.W, pady=(2, 0))
 
-        self._lbl(sb, "Выравнивание спрайтов:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
-        alf = tk.Frame(sb, bg=BG); alf.pack(fill=tk.X)
+        self._lbl(s3, "Выравнивание:", color=FG2).pack(anchor=tk.W, pady=(6, 2))
+        alf = tk.Frame(s3, bg=BG); alf.pack(fill=tk.X)
         self.atlas_align_w = tk.BooleanVar(value=True)
         self.atlas_align_h = tk.BooleanVar(value=True)
         tk.Checkbutton(alf, text="По ширине", variable=self.atlas_align_w,
@@ -1350,68 +1428,50 @@ class SpriteManufacturerApp:
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(side=tk.LEFT)
 
-        self._sep(sb)
-        self._lbl(sb, "4. Фильтр дубликатов", bold=True).pack(anchor=tk.W, pady=(0, 4))
+        # ── 4. Фильтр дубликатов ─────────────────────────────────────
+        s4 = self._section(sb, "4. Фильтр дубликатов", expanded=False)
         self.atlas_dedup = tk.BooleanVar(value=False)
-        tk.Checkbutton(sb, text="Убрать похожие / дублирующиеся спрайты",
-                       variable=self.atlas_dedup,
-                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+        tk.Checkbutton(s4, text="Убрать похожие / дублирующиеся",
+                       variable=self.atlas_dedup, bg=BG, fg=FG,
+                       selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(anchor=tk.W)
-        df = tk.Frame(sb, bg=BG); df.pack(fill=tk.X, pady=(4, 0))
+        df = tk.Frame(s4, bg=BG); df.pack(fill=tk.X, pady=(4, 0))
         self._lbl(df, "Схожесть (%):").pack(side=tk.LEFT)
         self.atlas_dedup_thresh = tk.IntVar(value=95)
         self._spinbox(df, self.atlas_dedup_thresh, 50, 100,
                       cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
         self.atlas_dedup_thresh.trace_add("write", lambda *_: self._atlas_update())
-        self.atlas_lbl_dedup = self._lbl(sb, "", color=FG2)
+        self.atlas_lbl_dedup = self._lbl(s4, "", color=FG2)
         self.atlas_lbl_dedup.pack(anchor=tk.W, pady=(2, 0))
 
-        self._sep(sb)
-        self._lbl(sb, "5. Компоновка атласа", bold=True).pack(anchor=tk.W, pady=(0, 5))
-
-        gf = tk.Frame(sb, bg=BG)
-        gf.pack(fill=tk.X, pady=2)
+        # ── 5. Компоновка ────────────────────────────────────────────
+        s5 = self._section(sb, "5. Компоновка", expanded=True)
+        gf = tk.Frame(s5, bg=BG); gf.pack(fill=tk.X, pady=2)
         self._lbl(gf, "Столбцов:").pack(side=tk.LEFT)
         self.atlas_cols = tk.IntVar(value=8)
         self._spinbox(gf, self.atlas_cols, 1, 128, cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
         self.atlas_cols.trace_add("write", lambda *_: self._atlas_update())
-
-        self._lbl(sb, "Ячейки без зазора — атлас точно кратен\nразмеру ячейки (для движков/тайлмапов).",
-                  color=FG2, size=8).pack(anchor=tk.W, pady=(2, 0))
-
-        self._btn(sb, "Обновить превью", self._atlas_update).pack(fill=tk.X, pady=(6, 4))
-
-        self.atlas_lbl_size = self._lbl(sb, "Размер атласа: — (авторасчёт)", color=FG2)
+        self._btn(s5, "Обновить превью", self._atlas_update).pack(fill=tk.X, pady=(6, 4))
+        self.atlas_lbl_size = self._lbl(s5, "Размер атласа: —", color=FG2)
         self.atlas_lbl_size.pack(anchor=tk.W)
-
-        zf = tk.Frame(sb, bg=BG)
-        zf.pack(fill=tk.X, pady=(4, 0))
+        zf = tk.Frame(s5, bg=BG); zf.pack(fill=tk.X, pady=(4, 0))
         self._lbl(zf, "Зум:").pack(side=tk.LEFT)
         self.atlas_lbl_zoom = self._lbl(zf, "100%", color=GOLD)
         self.atlas_lbl_zoom.pack(side=tk.LEFT, padx=6)
         self._btn(zf, "↺", self._atlas_zoom_reset, h=1).pack(side=tk.RIGHT)
-        self._lbl(sb, "Колёсико — зум  |  ЛКМ — двигать", color=FG2, size=8).pack(anchor=tk.W, pady=(2, 0))
+        self._lbl(s5, "Колёсико — зум  |  ЛКМ — двигать", color=FG2, size=8).pack(anchor=tk.W, pady=(2, 0))
 
-        self._sep(sb)
-        self._btn(sb, "Папка сохранения", self.atlas_out_dir).pack(fill=tk.X)
-        self.atlas_lbl_out = self._lbl(sb, "Папка не выбрана", color=FG2)
+        # ── 6. Сохранение ────────────────────────────────────────────
+        s6 = self._section(sb, "6. Сохранение", expanded=True)
+        self._btn(s6, "Папка сохранения", self.atlas_out_dir).pack(fill=tk.X)
+        self.atlas_lbl_out = self._lbl(s6, "Папка не выбрана", color=FG2)
         self.atlas_lbl_out.pack(anchor=tk.W, pady=(3, 0))
-
-        self._lbl(sb, "Имя файла:").pack(anchor=tk.W, pady=(6, 0))
+        self._lbl(s6, "Имя файла:").pack(anchor=tk.W, pady=(6, 0))
         self.atlas_name = tk.StringVar(value="atlas")
-        self.atlas_name_entry = tk.Entry(sb, textvariable=self.atlas_name, bg=BTN, fg=FG,
+        self.atlas_name_entry = tk.Entry(s6, textvariable=self.atlas_name, bg=BTN, fg=FG,
                                          relief=tk.FLAT, insertbackground=FG)
         self.atlas_name_entry.pack(fill=tk.X, pady=(2, 0))
         self.atlas_name_entry.bind("<KeyRelease>", lambda _: setattr(self, "_atlas_name_manual", True))
-
-        btm_save = tk.Frame(sb, bg=BG)
-        btm_save.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 6))
-        self.atlas_btn_save = self._btn(btm_save, "СОБРАТЬ И СОХРАНИТЬ АТЛАС", self.atlas_save,
-                                        ACC, h=2, state=tk.DISABLED)
-        self.atlas_btn_save.pack(fill=tk.X, pady=(0, 4))
-        self.atlas_btn_overwrite = self._btn(btm_save, "↺  Перезаписать текущий файл",
-                                             self.atlas_overwrite, GOLD, state=tk.DISABLED)
-        self.atlas_btn_overwrite.pack(fill=tk.X)
 
         # Трей выбора спрайтов (внизу)
         tray_outer = tk.Frame(area, bg=BG2)
