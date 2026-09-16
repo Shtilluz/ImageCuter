@@ -1342,7 +1342,23 @@ class SpriteManufacturerApp:
                        command=self._atlas_update).pack(side=tk.LEFT)
 
         self._sep(sb)
-        self._lbl(sb, "4. Компоновка атласа", bold=True).pack(anchor=tk.W, pady=(0, 5))
+        self._lbl(sb, "4. Фильтр дубликатов", bold=True).pack(anchor=tk.W, pady=(0, 4))
+        self.atlas_dedup = tk.BooleanVar(value=False)
+        tk.Checkbutton(sb, text="Убрать похожие / дублирующиеся спрайты",
+                       variable=self.atlas_dedup,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_update).pack(anchor=tk.W)
+        df = tk.Frame(sb, bg=BG); df.pack(fill=tk.X, pady=(4, 0))
+        self._lbl(df, "Схожесть (%):").pack(side=tk.LEFT)
+        self.atlas_dedup_thresh = tk.IntVar(value=95)
+        self._spinbox(df, self.atlas_dedup_thresh, 50, 100,
+                      cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
+        self.atlas_dedup_thresh.trace_add("write", lambda *_: self._atlas_update())
+        self.atlas_lbl_dedup = self._lbl(sb, "", color=FG2)
+        self.atlas_lbl_dedup.pack(anchor=tk.W, pady=(2, 0))
+
+        self._sep(sb)
+        self._lbl(sb, "5. Компоновка атласа", bold=True).pack(anchor=tk.W, pady=(0, 5))
 
         gf = tk.Frame(sb, bg=BG)
         gf.pack(fill=tk.X, pady=2)
@@ -1494,6 +1510,25 @@ class SpriteManufacturerApp:
         cmin, cmax = int(np.where(cols)[0][0]),  int(np.where(cols)[0][-1])
         return pil.crop((cmin, rmin, cmax + 1, rmax + 1))
 
+    def _dedup_raws(self, raws, thresh):
+        """Убирает визуально похожие спрайты. thresh — минимальная схожесть (0-100)."""
+        SIZE = 32
+        def _sig(pil):
+            a = np.array(pil.resize((SIZE, SIZE), Image.LANCZOS).convert("RGBA"),
+                         dtype=np.float32) / 255.0
+            return a.flatten()
+
+        sigs  = [_sig(p) for p in raws]
+        limit = 1.0 - thresh / 100.0   # MSE-порог: схожесть 95% → MSE ≤ 0.05
+        kept  = []
+        kept_sigs = []
+        for pil, sig in zip(raws, sigs):
+            dup = any(float(np.mean((sig - ks) ** 2)) <= limit for ks in kept_sigs)
+            if not dup:
+                kept.append(pil)
+                kept_sigs.append(sig)
+        return kept, len(raws) - len(kept)
+
     def _atlas_build(self):
         """Находит объекты и собирает атлас.
         Возвращает (PIL RGBA, кол-во, cell_w, cell_h, cols, rows) или (None, 0, ...) если пусто."""
@@ -1530,6 +1565,14 @@ class SpriteManufacturerApp:
             pil = self._cv2pil(rgba[y:y+h, x:x+w]).convert("RGBA")
             pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
             raws.append(pil)
+
+        # Дедупликация
+        removed = 0
+        if self.atlas_dedup.get():
+            raws, removed = self._dedup_raws(raws, self.atlas_dedup_thresh.get())
+        self._atlas_removed = removed
+
+        if not raws: return None, 0, cell0, cell0, 0, 0
 
         # Определяем размер ячейки по триммированным спрайтам
         max_w = max(p.width  for p in raws)
@@ -1589,7 +1632,13 @@ class SpriteManufacturerApp:
             sheet, n, cell_w, cell_h, cols, rows = self._atlas_build()
         except tk.TclError:
             return
-        self.atlas_lbl_cnt.config(text=f"Найдено объектов: {n}")
+        removed = getattr(self, "_atlas_removed", 0)
+        cnt_txt = f"Найдено объектов: {n + removed}"
+        if removed:
+            cnt_txt += f"  (убрано дубл.: {removed})"
+        self.atlas_lbl_cnt.config(text=cnt_txt)
+        dedup_txt = f"Удалено дубликатов: {removed}" if removed else ""
+        self.atlas_lbl_dedup.config(text=dedup_txt)
         self.atlas_sheet = sheet
         self.atlas_count = n
 
@@ -2363,6 +2412,9 @@ class SpriteManufacturerApp:
         self.atlas_chk_noup.config(state=tk.DISABLED)
         self.atlas_align_w.set(True)
         self.atlas_align_h.set(True)
+        self.atlas_dedup.set(False)
+        self.atlas_dedup_thresh.set(95)
+        self._atlas_removed = 0
         self.atlas_cols.set(8)
         self.atlas_name.set("atlas")
         self._atlas_name_manual = False
@@ -2370,6 +2422,7 @@ class SpriteManufacturerApp:
         self.atlas_lbl_file.config(text="Файл не выбран")
         self.atlas_lbl_out.config(text="Папка не выбрана")
         self.atlas_lbl_cnt.config(text="Найдено объектов: 0")
+        self.atlas_lbl_dedup.config(text="")
         self.atlas_lbl_size.config(text="Размер атласа: — (авторасчёт)")
         self.atlas_lbl_zoom.config(text="100%")
         self.atlas_btn_save.config(state=tk.DISABLED)
