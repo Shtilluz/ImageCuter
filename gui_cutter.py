@@ -102,6 +102,11 @@ class SpriteManufacturerApp:
         # Photo refs
         self._cv_photo   = None
 
+        # Per-panel label refs (set during pre-build)
+        self._src_lbls    = {}
+        self._outdir_lbls = {}
+        self._panels      = {}
+
         self._build_ui()
         self.root.bind("<Control-v>", self._global_paste)
         self.root.bind("<Control-V>", self._global_paste)
@@ -283,6 +288,12 @@ class SpriteManufacturerApp:
                           anchor=tk.W, padx=8)
         status.pack(fill=tk.X, side=tk.BOTTOM)
 
+        # Pre-build all tool panels once; _rebuild_props just shows/hides them
+        for _tn in ("auto", "shape", "grid", "atlas", "tiletest"):
+            _fr = tk.Frame(self._props, bg=BG)
+            getattr(self, f"_build_props_{_tn}")(_fr)
+            self._panels[_tn] = _fr
+
         # Initial tool
         self._tool_set("auto")
 
@@ -347,17 +358,21 @@ class SpriteManufacturerApp:
         self._cv_draw()
 
     def _rebuild_props(self):
-        for w in self._props.winfo_children():
-            w.destroy()
-        builder = {
-            "auto":     self._build_props_auto,
-            "shape":    self._build_props_shape,
-            "grid":     self._build_props_grid,
-            "atlas":    self._build_props_atlas,
-            "tiletest": self._build_props_tiletest,
-        }.get(self.tool)
-        if builder:
-            builder()
+        for f in self._panels.values():
+            f.pack_forget()
+        self._panels[self.tool].pack(fill=tk.BOTH, expand=True)
+        fname = (os.path.basename(self.src_path) if self.src_path
+                 else ("из буфера" if self.src_img is not None else "Файл не выбран"))
+        if self.tool in self._src_lbls:
+            self._src_lbls[self.tool].config(text=fname)
+        if self.tool in self._outdir_lbls:
+            self._outdir_lbls[self.tool].config(text=self.outdir or "Папка не выбрана")
+        if self.tool == "auto":
+            self._auto_run()
+        elif self.tool == "grid":
+            self._grid_update()
+        elif self.tool == "atlas" and self.src_img is not None:
+            self._atlas_update()
 
     def _rebind_canvas(self, name):
         cv = self._canvas
@@ -687,15 +702,15 @@ class SpriteManufacturerApp:
     #  PROPS PANEL BUILDERS
     # ══════════════════════════════════════════════════════════════════
 
-    def _build_props_auto(self):
-        p = self._props
+    def _build_props_auto(self, parent=None):
+        p = parent if parent is not None else self._props
         self._lbl(p, "Авто-детекция", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
         self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
         row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
         self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
         self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbl = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbl.pack(anchor=tk.W, pady=(2,0))
+        self._src_lbls["auto"] = self._lbl(p, "Файл не выбран", color=FG2)
+        self._src_lbls["auto"].pack(anchor=tk.W, pady=(2,0))
         self._sep(p)
         self._lbl(p, "Порог фона (200–255):").pack(anchor=tk.W)
         self._auto_thresh = tk.Scale(p, from_=200, to=255, orient=tk.HORIZONTAL,
@@ -722,24 +737,19 @@ class SpriteManufacturerApp:
         self._btn(p, "➕  Добавить в трей", self._auto_add_to_tray, GRN, h=2).pack(fill=tk.X, pady=3)
         self._sep(p)
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
-        self._outdir_lbl = self._lbl(p, "Папка не выбрана", color=FG2)
-        self._outdir_lbl.pack(anchor=tk.W, pady=(3,0))
+        self._outdir_lbls["auto"] = self._lbl(p, "Папка не выбрана", color=FG2)
+        self._outdir_lbls["auto"].pack(anchor=tk.W, pady=(3,0))
         self._btn(p, "РАЗДЕЛИТЬ И СОХРАНИТЬ", self._auto_save, ACC, h=2).pack(fill=tk.X, pady=(10,3))
-        if self.src_img is not None and hasattr(self, "_src_lbl"):
-            self._src_lbl.config(text=os.path.basename(self.src_path) if self.src_path else "из буфера")
-        if self.outdir:
-            self._outdir_lbl.config(text=self.outdir)
-        self._auto_run()
 
-    def _build_props_shape(self):
-        p = self._props
+    def _build_props_shape(self, parent=None):
+        p = parent if parent is not None else self._props
         self._lbl(p, "Вырезание фигур", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
         self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
         row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
         self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
         self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbl = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbl.pack(anchor=tk.W)
+        self._src_lbls["shape"] = self._lbl(p, "Файл не выбран", color=FG2)
+        self._src_lbls["shape"].pack(anchor=tk.W)
         self._sep(p)
         self._lbl(p, "Инструмент рисования:", bold=True).pack(anchor=tk.W, pady=(0,5))
         if not hasattr(self, "_sh_tool_var"):
@@ -770,23 +780,21 @@ class SpriteManufacturerApp:
         self._btn(row2, "Очистить всё", self._sh_clear, RED).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         self._sep(p)
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
-        self._outdir_lbl = self._lbl(p, self.outdir if self.outdir else "Папка не выбрана", color=FG2)
-        self._outdir_lbl.pack(anchor=tk.W, pady=(3,0))
+        self._outdir_lbls["shape"] = self._lbl(p, "Папка не выбрана", color=FG2)
+        self._outdir_lbls["shape"].pack(anchor=tk.W, pady=(3,0))
         self._btn(p, "✂  Вырезать → в трей", self._sh_apply, GRN, h=2).pack(fill=tk.X, pady=(8,3))
         self._btn(p, "ВЫРЕЗАТЬ И СОХРАНИТЬ", self._sh_save, ACC, h=2).pack(fill=tk.X, pady=3)
         self._lbl(p, "Esc — сброс  |  ПКМ — завершить", color=FG2, size=8).pack(anchor=tk.W)
-        if self.src_img is not None and hasattr(self, "_src_lbl"):
-            self._src_lbl.config(text=os.path.basename(self.src_path) if self.src_path else "из буфера")
 
-    def _build_props_grid(self):
-        p = self._props
+    def _build_props_grid(self, parent=None):
+        p = parent if parent is not None else self._props
         self._lbl(p, "Сетка тайлов", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
         self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
         row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
         self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
         self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbl = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbl.pack(anchor=tk.W)
+        self._src_lbls["grid"] = self._lbl(p, "Файл не выбран", color=FG2)
+        self._src_lbls["grid"].pack(anchor=tk.W)
         self._sep(p)
         self._lbl(p, "Параметры сетки:", bold=True).pack(anchor=tk.W, pady=(0,5))
         if not hasattr(self, "_grid_mode"):
@@ -827,16 +835,13 @@ class SpriteManufacturerApp:
         self._grid_cnt_lbl.pack(anchor=tk.W, pady=4)
         self._sep(p)
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
-        self._outdir_lbl = self._lbl(p, self.outdir if self.outdir else "Папка не выбрана", color=FG2)
-        self._outdir_lbl.pack(anchor=tk.W, pady=(3,0))
+        self._outdir_lbls["grid"] = self._lbl(p, "Папка не выбрана", color=FG2)
+        self._outdir_lbls["grid"].pack(anchor=tk.W, pady=(3,0))
         self._btn(p, "➕  Добавить в трей", self._grid_to_tray, GRN, h=2).pack(fill=tk.X, pady=(8,3))
         self._btn(p, "НАРЕЗАТЬ И СОХРАНИТЬ", self._grid_save, ACC, h=2).pack(fill=tk.X, pady=3)
-        if self.src_img is not None and hasattr(self, "_src_lbl"):
-            self._src_lbl.config(text=os.path.basename(self.src_path) if self.src_path else "из буфера")
-        self._grid_update()
 
-    def _build_props_atlas(self):
-        p = self._props
+    def _build_props_atlas(self, parent=None):
+        p = parent if parent is not None else self._props
         self._lbl(p, "Сборка атласа", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
         pf = tk.Frame(p, bg=BG); pf.pack(fill=tk.X, pady=(0,4))
         self._btn(pf, "📂 Открыть проект", self.project_load, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
@@ -847,8 +852,8 @@ class SpriteManufacturerApp:
         row = tk.Frame(s1, bg=BG); row.pack(fill=tk.X, pady=2)
         self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
         self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbl = self._lbl(s1, "Файл не выбран", color=FG2)
-        self._src_lbl.pack(anchor=tk.W)
+        self._src_lbls["atlas"] = self._lbl(s1, "Файл не выбран", color=FG2)
+        self._src_lbls["atlas"].pack(anchor=tk.W)
 
         s2 = self._section(p, "2. Поиск объектов")
         self._lbl(s2, "Порог фона:").pack(anchor=tk.W)
@@ -943,8 +948,8 @@ class SpriteManufacturerApp:
 
         s6 = self._section(p, "6. Сохранение")
         self._btn(s6, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
-        self._outdir_lbl = self._lbl(s6, self.outdir if self.outdir else "Папка не выбрана", color=FG2)
-        self._outdir_lbl.pack(anchor=tk.W, pady=(3,0))
+        self._outdir_lbls["atlas"] = self._lbl(s6, "Папка не выбрана", color=FG2)
+        self._outdir_lbls["atlas"].pack(anchor=tk.W, pady=(3,0))
         self._lbl(s6, "Имя файла:").pack(anchor=tk.W, pady=(6,0))
         if not hasattr(self, "_atlas_name"):
             self._atlas_name = tk.StringVar(value="atlas")
@@ -965,20 +970,15 @@ class SpriteManufacturerApp:
         if not self._atlas_last_out:
             self._atlas_overwrite_btn.config(state=tk.DISABLED)
 
-        if self.src_img is not None:
-            if hasattr(self, "_src_lbl"):
-                self._src_lbl.config(text=os.path.basename(self.src_path) if self.src_path else "из буфера")
-            self._atlas_update()
-
-    def _build_props_tiletest(self):
-        p = self._props
+    def _build_props_tiletest(self, parent=None):
+        p = parent if parent is not None else self._props
         self._lbl(p, "Тайл-тест", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
         self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
         row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
         self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
         self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbl = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbl.pack(anchor=tk.W)
+        self._src_lbls["tiletest"] = self._lbl(p, "Файл не выбран", color=FG2)
+        self._src_lbls["tiletest"].pack(anchor=tk.W)
         self._sep(p)
         self._lbl(p, "Размер тайла:", bold=True).pack(anchor=tk.W, pady=(0,5))
         if not hasattr(self, "_tc_size_var"):
@@ -1024,16 +1024,14 @@ class SpriteManufacturerApp:
         self._btn(zf, "↺", self._cv_zoom_reset, h=1).pack(side=tk.RIGHT)
         self._sep(p)
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
-        self._outdir_lbl = self._lbl(p, self.outdir if self.outdir else "Папка не выбрана", color=FG2)
-        self._outdir_lbl.pack(anchor=tk.W, pady=(3,0))
+        self._outdir_lbls["tiletest"] = self._lbl(p, "Папка не выбрана", color=FG2)
+        self._outdir_lbls["tiletest"].pack(anchor=tk.W, pady=(3,0))
         self._lbl(p, "Имя файла:").pack(anchor=tk.W, pady=(6,0))
         if not hasattr(self, "_tc_name_var"):
             self._tc_name_var = tk.StringVar(value="tile")
         tk.Entry(p, textvariable=self._tc_name_var, bg=BTN, fg=FG,
                  relief=tk.FLAT, insertbackground=FG).pack(fill=tk.X)
         self._btn(p, "СОХРАНИТЬ ТАЙЛ", self._tc_save, ACC, h=2).pack(fill=tk.X, pady=(8,3))
-        if self.src_img is not None and hasattr(self, "_src_lbl"):
-            self._src_lbl.config(text=os.path.basename(self.src_path) if self.src_path else "из буфера")
     # ══════════════════════════════════════════════════════════════════
     #  DND SETUP
     # ══════════════════════════════════════════════════════════════════
@@ -1085,10 +1083,8 @@ class SpriteManufacturerApp:
         if not self.outdir:
             self.outdir = os.path.dirname(path)
             self._add_recent(self.outdir)
-        if hasattr(self, "_src_lbl"):
-            self._src_lbl.config(text=os.path.basename(path))
-        if hasattr(self, "_outdir_lbl"):
-            self._outdir_lbl.config(text=self.outdir)
+        self._update_src_lbl(os.path.basename(path))
+        self._update_outdir_lbl(self.outdir)
         self._status_var.set(f"Открыто: {os.path.basename(path)}  ({img.shape[1]}×{img.shape[0]})")
         if self.tool == "auto":
             self._auto_run()
@@ -1106,8 +1102,7 @@ class SpriteManufacturerApp:
         self._cv_view_x = 0
         self._cv_view_y = 0
         self._auto_contours_cache = []
-        if hasattr(self, "_src_lbl"):
-            self._src_lbl.config(text="Файл не выбран")
+        self._update_src_lbl("Файл не выбран")
         self._cv_draw()
 
     def _menu_choose_outdir(self):
@@ -1115,8 +1110,15 @@ class SpriteManufacturerApp:
         if d:
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
+
+    def _update_src_lbl(self, text):
+        for lbl in self._src_lbls.values():
+            lbl.config(text=text)
+
+    def _update_outdir_lbl(self, text):
+        for lbl in self._outdir_lbls.values():
+            lbl.config(text=text)
 
     # ══════════════════════════════════════════════════════════════════
     #  CLIPBOARD
@@ -1382,8 +1384,7 @@ class SpriteManufacturerApp:
             if not d: return
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
         idx = self._next_idx(self.outdir, "sprite_")
         for pil in visible:
             pil.save(os.path.join(self.outdir, f"sprite_{idx:04d}.png"))
@@ -1443,8 +1444,7 @@ class SpriteManufacturerApp:
             if not d: return
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
         tv  = self._auto_thresh.get() if hasattr(self, "_auto_thresh") else 245
         ms  = self._auto_min.get()    if hasattr(self, "_auto_min")    else 12
         sep = self._auto_sep.get()    if hasattr(self, "_auto_sep")    else 0
@@ -1602,8 +1602,7 @@ class SpriteManufacturerApp:
             if not d: return
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
         pil = self._cv2pil(self.src_img)
         if pil is None: return
         base = pil.convert("RGBA")
@@ -1712,8 +1711,7 @@ class SpriteManufacturerApp:
             if not d: return
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
         tiles = self._grid_tiles()
         if not tiles:
             messagebox.showinfo("Нет тайлов", "Сетка не содержит тайлов")
@@ -1938,8 +1936,7 @@ class SpriteManufacturerApp:
             if not d: return
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
         sheet, n, *_ = self._atlas_build()
         if sheet is None:
             messagebox.showwarning("Ошибка", "Объекты не найдены")
@@ -1980,8 +1977,7 @@ class SpriteManufacturerApp:
             if not d: return
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
         raws = [p for i, p in enumerate(self._atlas_raws) if i not in self.excluded]
         if hasattr(self, "_atlas_dedup") and self._atlas_dedup.get():
             raws, _ = self._dedup_raws(raws, self._atlas_dedup_thresh.get())
@@ -2089,8 +2085,7 @@ class SpriteManufacturerApp:
             if not d: return
             self.outdir = d
             self._add_recent(d)
-            if hasattr(self, "_outdir_lbl"):
-                self._outdir_lbl.config(text=d)
+            self._update_outdir_lbl(d)
         pil = self._cv2pil(self.src_img)
         if pil is None: return
         pil = pil.convert("RGBA")
@@ -2187,15 +2182,13 @@ class SpriteManufacturerApp:
         if hasattr(self, "_atlas_name"):         self._atlas_name.set(s.get("atlas_name", "atlas"))
         self.outdir = data.get("outdir", "")
         self._atlas_last_out = data.get("last_out") or None
-        if hasattr(self, "_outdir_lbl"):
-            self._outdir_lbl.config(text=self.outdir if self.outdir else "Папка не выбрана")
+        self._update_outdir_lbl(self.outdir or "Папка не выбрана")
         if self._atlas_last_out and hasattr(self, "_atlas_overwrite_btn"):
             self._atlas_overwrite_btn.config(state=tk.NORMAL)
         if img is not None:
             self.src_img  = img
             self.src_path = src_path
-            if hasattr(self, "_src_lbl"):
-                self._src_lbl.config(text=os.path.basename(src_path))
+            self._update_src_lbl(os.path.basename(src_path))
             self._atlas_update()
 
     # ══════════════════════════════════════════════════════════════════
