@@ -1,47 +1,81 @@
-# ImageCuter - ИИ Разделитель Спрайтов / AI Sprite Cutter
+# Sprite Manufacturer
 
-[Russian](#russian) | [English](#english)
+[Русский](#russian) | [English](#english)
 
 ---
 
 <a name="russian"></a>
-## Русский (Russian)
+## Русский
 
 ### Описание
-**ImageCuter** — это удобное графическое приложение для автоматической нарезки спрайтов и объектов из изображений. Программа находит объекты на однотонном фоне (светлом или темном) и сохраняет их как отдельные прозрачные PNG-файлы.
 
-### Основные возможности
-*   **Автоматическое обнаружение:** Использование OpenCV для поиска контуров объектов.
-*   **Пакетная обработка:** Возможность выбрать сразу несколько файлов для нарезки.
-*   **Гибкая настройка:**
-    *   Регулировка порога чувствительности для работы с разными фонами.
-    *   Фильтрация по минимальному размеру объекта, чтобы избежать сохранения "мусора".
-*   **Предпросмотр:** Визуальное выделение найденных объектов перед сохранением.
-*   **Сохранение прозрачности:** Все вырезанные спрайты сохраняются в формате PNG с прозрачным фоном.
-*   **История папок:** Запоминает последние использованные папки для сохранения.
+**Sprite Manufacturer** — профессиональный инструмент для работы со спрайтами и атласами текстур. Единое рабочее пространство в стиле TexturePacker/Photoshop: левая панель инструментов, центральный холст с зумом и панорамой, правая панель настроек, нижний трей спрайтов.
 
-### Как использовать
-1.  **Выбрать картинки:** Нажмите кнопку "Выбрать картинки" и выберите один или несколько файлов (PNG, JPG, JPEG, WebP, BMP).
-2.  **Настроить папку сохранения:** Выберите папку, куда будут сохраняться готовые спрайты.
-3.  **Отрегулировать параметры:**
-    *   **Порог белого фона:** Настройте ползунок так, чтобы зеленые рамки четко охватывали нужные объекты.
-    *   **Мин. размер объекта:** Увеличьте, если программа находит слишком мелкие точки (шум).
-4.  **Проверить результат:** Используйте кнопки навигации `<<` и `>>`, если выбрано несколько файлов.
-5.  **Сохранить:** Нажмите "РАЗДЕЛИТЬ И СОХРАНИТЬ ВСЕ".
+Цветовая схема: тёмный чарколь + янтарный акцент.
 
-### Требования для запуска (из исходников)
-*   Python 3.x
-*   Библиотеки: `opencv-python`, `numpy`, `Pillow`
+### Возможности
 
-Установка зависимостей:
+#### 🔍 Авто-детекция
+- Автоматический поиск объектов на однотонном фоне (светлом или тёмном)
+- Настраиваемый порог фона, минимальный размер объекта, морфологическое разделение касающихся спрайтов (эрозия)
+- Предпросмотр найденных контуров прямо на холсте
+
+#### ✏️ Вырезание фигур
+- Три режима: прямоугольник, произвольный многоугольник, лассо
+- Вырезание с прозрачным или непрозрачным фоном
+- Несколько выделений за один сеанс
+
+#### 📐 Сетка тайлов
+- Нарезка по заданному размеру тайла или количеству ячеек
+- Смещение сетки по X/Y
+- Пропуск пустых тайлов
+
+#### 📦 Сборка атласа
+- Автоматическая сборка атласа текстур из обнаруженных спрайтов
+- Режимы подгонки: **обрезка** (tight bbox) или **масштабирование**
+- Выравнивание ячеек по ширине и/или высоте
+- Удаление дубликатов с настраиваемым порогом схожести
+- Пресеты размера ячейки: 16 / 32 / 64 / 128 / 256 px
+- Сохранение атласа в PNG + экспорт спрайтов по отдельным файлам
+
+#### 🎮 Тайл-тест
+- Проверка бесшовности тайла — предпросмотр NxN-сетки
+- Настраиваемый размер тайла и зоны выбора
+- Привязка к сетке
+
+### Общие возможности
+- **Drag & Drop** — перетащите изображение прямо в окно
+- **Ctrl+V** — вставка из буфера обмена
+- **Трей спрайтов** — все нарезанные спрайты отображаются в нижней полосе; клик — включить/исключить из атласа
+- **Зум и панорама** — колёсико мыши + перетаскивание средней кнопкой
+- **Сохранение проекта** — формат `.smproj` (JSON + встроенное изображение base64), позволяет продолжить работу в любой момент
+
+### Требования
+
+- Python 3.9+
+- `opencv-python`
+- `numpy`
+- `Pillow`
+- `tkinterdnd2`
+
 ```bash
-pip install opencv-python numpy Pillow
+pip install opencv-python numpy Pillow tkinterdnd2
 ```
 
+### Запуск
+
+```bash
+python gui_cutter.py
+```
+
+### Лицензия
+
+Условия использования описаны в файле [LICENSE_RU.md](LICENSE_RU.md).
+
 ### Автор
-*   **Автор:** Shtillgor
-*   **Сайт:** [midgro.uz](https://midgro.uz/)
-*   **Связь:** +998909603560
+
+- **Shtillgor**
+- Сайт: [midgro.uz](https://midgro.uz/)
 
 ---
 
@@ -49,37 +83,71 @@ pip install opencv-python numpy Pillow
 ## English
 
 ### Description
-**ImageCuter** is a user-friendly GUI application designed for automatic sprite and object extraction from images. The program identifies objects on a solid background (light or dark) and saves them as individual transparent PNG files.
 
-### Key Features
-*   **Automatic Detection:** Utilizes OpenCV for object contour detection.
-*   **Batch Processing:** Ability to select multiple image files at once.
-*   **Flexible Configuration:**
-    *   Adjustable sensitivity threshold for various backgrounds.
-    *   Minimum object size filtering to prevent saving "noise".
-*   **Live Preview:** Visual highlighting of detected objects before saving.
-*   **Transparency Support:** All extracted sprites are saved in PNG format with a transparent background.
-*   **Directory History:** Remembers recently used output folders.
+**Sprite Manufacturer** is a professional tool for working with sprites and texture atlases. A unified workspace inspired by TexturePacker/Photoshop: left toolbar, center canvas with zoom & pan, right properties panel, bottom sprite tray.
 
-### How to Use
-1.  **Select Images:** Click "Select Images" and choose one or more files (PNG, JPG, JPEG, WebP, BMP).
-2.  **Set Output Directory:** Choose the folder where the extracted sprites will be saved.
-3.  **Adjust Parameters:**
-    *   **Background Threshold:** Move the slider until the green boxes accurately wrap around the desired objects.
-    *   **Min Object Size:** Increase this value if the program detects tiny dots or noise.
-4.  **Review Results:** Use the `<<` and `>>` navigation buttons if multiple files are selected.
-5.  **Save:** Click "SPLIT AND SAVE ALL".
+Color scheme: dark charcoal + amber accent.
 
-### Requirements (from source)
-*   Python 3.x
-*   Libraries: `opencv-python`, `numpy`, `Pillow`
+### Features
 
-Install dependencies:
+#### 🔍 Auto Detection
+- Automatically finds objects on a solid background (light or dark)
+- Adjustable background threshold, minimum object size, and morphological separation of touching sprites (erosion)
+- Live contour preview directly on the canvas
+
+#### ✏️ Shape Cutter
+- Three modes: rectangle, polygon, lasso
+- Cut with transparent or solid background
+- Multiple selections per session
+
+#### 📐 Grid Slicer
+- Slice by tile size or cell count
+- X/Y offset support
+- Skip empty tiles
+
+#### 📦 Atlas Builder
+- Automatically assembles a texture atlas from detected sprites
+- Fitting modes: **trim** (tight bbox) or **scale**
+- Per-axis alignment (width and/or height)
+- Duplicate removal with configurable similarity threshold
+- Cell size presets: 16 / 32 / 64 / 128 / 256 px
+- Save atlas as PNG + export sprites as individual files
+
+#### 🎮 Tile Tester
+- Check tile seamlessness with an NxN grid preview
+- Configurable tile and selection size
+- Grid snapping
+
+### General Features
+- **Drag & Drop** — drop an image directly into the window
+- **Ctrl+V** — paste from clipboard
+- **Sprite Tray** — all sliced sprites appear in the bottom strip; click to include/exclude from the atlas
+- **Zoom & Pan** — mouse wheel + middle-button drag
+- **Project Save** — `.smproj` format (JSON + embedded base64 image), resume work at any time
+
+### Requirements
+
+- Python 3.9+
+- `opencv-python`
+- `numpy`
+- `Pillow`
+- `tkinterdnd2`
+
 ```bash
-pip install opencv-python numpy Pillow
+pip install opencv-python numpy Pillow tkinterdnd2
 ```
 
+### Run
+
+```bash
+python gui_cutter.py
+```
+
+### License
+
+See [LICENSE_EN.md](LICENSE_EN.md) for terms of use.
+
 ### Author
-*   **Author:** Shtillgor
-*   **Website:** [midgro.uz](https://midgro.uz/)
-*   **Contact:** +998909603560
+
+- **Shtillgor**
+- Website: [midgro.uz](https://midgro.uz/)

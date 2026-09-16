@@ -16,3 +16,9 @@ ENV/
 
 # Configuration
 config.json
+
+# Project files (user data)
+*.smproj
+
+# Test images
+Test_images/
