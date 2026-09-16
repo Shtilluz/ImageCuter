@@ -1413,6 +1413,25 @@ class SpriteManufacturerApp:
                                              self.atlas_overwrite, GOLD, state=tk.DISABLED)
         self.atlas_btn_overwrite.pack(fill=tk.X)
 
+        # Трей выбора спрайтов (внизу)
+        tray_outer = tk.Frame(area, bg=BG2)
+        tray_outer.pack(side=tk.BOTTOM, fill=tk.X)
+        tray_top = tk.Frame(tray_outer, bg=BG2)
+        tray_top.pack(fill=tk.X)
+        self._lbl(tray_top, "Спрайты  (клик — убрать / вернуть):",
+                  color=FG2, size=8).pack(side=tk.LEFT, padx=6, pady=2)
+        self.atlas_tray_lbl = self._lbl(tray_top, "", color=FG2, size=8)
+        self.atlas_tray_lbl.pack(side=tk.RIGHT, padx=6)
+        tray_row = tk.Frame(tray_outer, bg=BG2)
+        tray_row.pack(fill=tk.X)
+        self.atlas_tray = tk.Canvas(tray_row, bg=BG2, height=72, highlightthickness=0)
+        self.atlas_tray.pack(side=tk.TOP, fill=tk.X)
+        tray_hsb = ttk.Scrollbar(tray_row, orient=tk.HORIZONTAL, command=self.atlas_tray.xview)
+        tray_hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self.atlas_tray.configure(xscrollcommand=tray_hsb.set)
+        self.atlas_tray.bind("<Button-1>", self._tray_click)
+
+        # Главный canvas превью
         self.atlas_canvas = tk.Canvas(area, bg="#1e2124", highlightthickness=0, cursor="fleur")
         self.atlas_canvas.pack(fill=tk.BOTH, expand=True)
         self.atlas_canvas.bind("<Configure>",       lambda _: self._atlas_render_canvas())
@@ -1431,8 +1450,8 @@ class SpriteManufacturerApp:
         self.atlas_count  = 0
         self.atlas_src_path     = None
         self._atlas_name_manual = False
-        self._atlas_last_out    = None   # путь последнего сохранённого файла
-        self._atlas_vis         = None   # full-res PIL с сеткой ячеек
+        self._atlas_last_out    = None
+        self._atlas_vis         = None
         self._atlas_cell_w      = 64
         self._atlas_cell_h      = 64
         self._atlas_cols_n      = 0
@@ -1443,6 +1462,9 @@ class SpriteManufacturerApp:
         self.atlas_zoom         = 1.0
         self.atlas_view_x       = 0
         self.atlas_view_y       = 0
+        self.atlas_excluded     = set()   # индексы спрайтов, исключённых вручную
+        self._atlas_raws        = []      # кешированные обрезанные кропы
+        self._tray_photos       = []      # удерживаем ссылки на PhotoImage
 
     def atlas_open(self, path=None):
         if path is None:
@@ -1458,10 +1480,12 @@ class SpriteManufacturerApp:
             self.atlas_lbl_out.config(text=self.atlas_outdir)
             self._add_recent(self.atlas_outdir)
         self._atlas_name_manual = False
-        self.atlas_zoom    = 1.0
-        self.atlas_view_x  = 0
-        self.atlas_view_y  = 0
-        self._atlas_vis    = None
+        self.atlas_zoom     = 1.0
+        self.atlas_view_x   = 0
+        self.atlas_view_y   = 0
+        self._atlas_vis     = None
+        self.atlas_excluded = set()
+        self._atlas_raws    = []
         self.atlas_lbl_zoom.config(text="100%")
         self._atlas_suggest_name()
         self._atlas_update()
@@ -1493,6 +1517,108 @@ class SpriteManufacturerApp:
     def _atlas_preset(self, v):
         self.atlas_cell.set(v)
         self._atlas_update()
+
+    # ── Детекция спрайтов (кеш) ─────────────────────────────────────────────
+    def _atlas_detect_raws(self):
+        """Детектирует спрайты и возвращает список обрезанных PIL RGBA.
+        Результат кешируется в self._atlas_raws; исключения сбрасываются при смене списка."""
+        img = self.atlas_img
+        if img is None:
+            self._atlas_raws = []
+            return []
+        tv  = self.atlas_thresh.get()
+        ms  = self.atlas_min.get()
+        sep = max(0, self.atlas_sep.get())
+        contours = self._auto_contours(img, tv, ms, sep=sep)
+        if not contours:
+            self._atlas_raws = []
+            return []
+
+        has_alpha = len(img.shape) == 3 and img.shape[2] == 4
+        dark_bg   = (not has_alpha and len(img.shape) == 3 and
+                     int(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)[0, 0]) < 127)
+        rgba = (cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                if len(img.shape) == 3 and img.shape[2] == 3 else img.copy())
+
+        cell0 = max(4, self.atlas_cell.get())
+        boxes = sorted([cv2.boundingRect(c) for c in contours],
+                       key=lambda b: (b[1] // max(1, cell0), b[0]))
+
+        raws = []
+        for (x, y, w, h) in boxes:
+            pil = self._cv2pil(rgba[y:y+h, x:x+w]).convert("RGBA")
+            pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
+            raws.append(pil)
+
+        # Сбрасываем ручные исключения если размер списка изменился
+        if len(raws) != len(self._atlas_raws):
+            self.atlas_excluded = set()
+
+        self._atlas_raws = raws
+        return raws
+
+    # ── Трей выбора спрайтов ────────────────────────────────────────────────
+    _TRAY_SZ  = 60   # размер ячейки трея (пикс)
+    _TRAY_PAD = 4
+
+    def _atlas_refresh_tray(self):
+        SZ, PAD = self._TRAY_SZ, self._TRAY_PAD
+        self.atlas_tray.delete("all")
+        self._tray_photos = []
+        raws = self._atlas_raws
+
+        for i, pil in enumerate(raws):
+            excluded = i in self.atlas_excluded
+            thumb = pil.copy()
+            thumb.thumbnail((SZ - 4, SZ - 4), Image.LANCZOS)
+            cell = Image.new("RGBA", (SZ, SZ), (28, 31, 36, 255))
+            ox = (SZ - thumb.width)  // 2
+            oy = (SZ - thumb.height) // 2
+            cell.paste(thumb, (ox, oy), thumb)
+
+            if excluded:
+                overlay = Image.new("RGBA", (SZ, SZ), (160, 0, 0, 140))
+                cell = Image.alpha_composite(cell, overlay)
+                d = ImageDraw.Draw(cell)
+                d.line([(4, 4), (SZ-4, SZ-4)], fill=(255, 60, 60), width=2)
+                d.line([(SZ-4, 4), (4, SZ-4)], fill=(255, 60, 60), width=2)
+
+            # рамка: зелёная = включён, красная = исключён
+            border_col = "#cc2222" if excluded else "#00e050"
+            d2 = ImageDraw.Draw(cell)
+            d2.rectangle([0, 0, SZ-1, SZ-1], outline=border_col, width=1)
+
+            photo = ImageTk.PhotoImage(cell)
+            self._tray_photos.append(photo)
+            x = PAD + i * (SZ + PAD)
+            self.atlas_tray.create_image(x, PAD, anchor=tk.NW, image=photo)
+
+        total_w = PAD + len(raws) * (SZ + PAD)
+        self.atlas_tray.configure(scrollregion=(0, 0, max(total_w, 1), SZ + PAD * 2))
+
+        n_exc = len(self.atlas_excluded)
+        n_vis = len(raws) - n_exc
+        self.atlas_tray_lbl.config(
+            text=f"{n_vis} из {len(raws)}  (исключено: {n_exc})" if n_exc
+            else f"всего: {len(raws)}"
+        )
+
+    def _tray_click(self, e):
+        SZ, PAD = self._TRAY_SZ, self._TRAY_PAD
+        cx = self.atlas_tray.canvasx(e.x)
+        i  = int(cx // (SZ + PAD))
+        if 0 <= i < len(self._atlas_raws):
+            if i in self.atlas_excluded:
+                self.atlas_excluded.discard(i)
+            else:
+                self.atlas_excluded.add(i)
+            # обновляем только трей и атлас — без повторной детекции
+            self._atlas_refresh_tray()
+            self._atlas_assemble()
+
+    def _atlas_assemble(self):
+        """Строит атлас из уже закешированных raws (без повторной детекции)."""
+        self._atlas_build_internal()
 
     def _atlas_mode_changed(self):
         mode = self.atlas_fit_mode.get()
@@ -1539,41 +1665,23 @@ class SpriteManufacturerApp:
         return kept, len(raws) - len(kept)
 
     def _atlas_build(self):
-        """Находит объекты и собирает атлас.
+        """Собирает атлас из self._atlas_raws (с учётом исключений и дедупа).
         Возвращает (PIL RGBA, кол-во, cell_w, cell_h, cols, rows) или (None, 0, ...) если пусто."""
-        img = self.atlas_img
-        cell0 = max(4, self.atlas_cell.get())
-        if img is None: return None, 0, cell0, cell0, 0, 0
-        tv    = self.atlas_thresh.get()
-        ms    = self.atlas_min.get()
-        sep   = max(0, self.atlas_sep.get())
-        contours = self._auto_contours(img, tv, ms, sep=sep)
-        if not contours: return None, 0, cell0, cell0, 0, 0
+        cell0  = max(4, self.atlas_cell.get())
+        raws_all = self._atlas_raws
+        if not raws_all:
+            return None, 0, cell0, cell0, 0, 0
 
         cols   = max(1, self.atlas_cols.get())
-        mode   = self.atlas_fit_mode.get()   # "trim" | "scale"
+        mode   = self.atlas_fit_mode.get()
         no_up  = self.atlas_no_upscale.get()
         norm_w = self.atlas_align_w.get()
         norm_h = self.atlas_align_h.get()
 
-        has_alpha = len(img.shape) == 3 and img.shape[2] == 4
-        if not has_alpha and len(img.shape) == 3:
-            dark_bg = int(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)[0, 0]) < 127
-        else:
-            dark_bg = False
-
-        rgba = (cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-                if len(img.shape) == 3 and img.shape[2] == 3 else img.copy())
-
-        boxes = [cv2.boundingRect(c) for c in contours]
-        boxes.sort(key=lambda b: (b[1] // max(1, cell0), b[0]))
-
-        # 1-й проход: кроп + trim (в режиме "обрезка" или всегда перед scale)
-        raws = []
-        for (x, y, w, h) in boxes:
-            pil = self._cv2pil(rgba[y:y+h, x:x+w]).convert("RGBA")
-            pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
-            raws.append(pil)
+        # Применяем ручные исключения
+        raws = [p for i, p in enumerate(raws_all) if i not in self.atlas_excluded]
+        if not raws:
+            return None, 0, cell0, cell0, 0, 0
 
         # Дедупликация
         removed = 0
@@ -1581,15 +1689,14 @@ class SpriteManufacturerApp:
             raws, removed = self._dedup_raws(raws, self.atlas_dedup_thresh.get())
         self._atlas_removed = removed
 
-        if not raws: return None, 0, cell0, cell0, 0, 0
+        if not raws:
+            return None, 0, cell0, cell0, 0, 0
 
-        # Определяем размер ячейки по триммированным спрайтам
-        max_w = max(p.width  for p in raws)
-        max_h = max(p.height for p in raws)
+        max_w  = max(p.width  for p in raws)
+        max_h  = max(p.height for p in raws)
         cell_w = cell0 if norm_w else max_w
         cell_h = cell0 if norm_h else max_h
 
-        # 2-й проход: масштабирование (только в режиме "scale")
         tiles = []
         for pil in raws:
             if mode == "scale":
@@ -1608,7 +1715,6 @@ class SpriteManufacturerApp:
                     nh = max(1, round(pil.height * scale))
                     pil = pil.resize((nw, nh), Image.LANCZOS)
             else:
-                # trim-режим: натуральный размер, обрезать если больше ячейки
                 if pil.width > cell_w or pil.height > cell_h:
                     l = max(0, (pil.width  - cell_w) // 2)
                     t = max(0, (pil.height - cell_h) // 2)
@@ -1616,7 +1722,6 @@ class SpriteManufacturerApp:
                                          t + min(cell_h, pil.height)))
             tiles.append(pil)
 
-        # Подгоняем cell_w/cell_h под реальные размеры после масштабирования
         if not norm_w:
             cell_w = max(t.width  for t in tiles)
         if not norm_h:
@@ -1635,16 +1740,23 @@ class SpriteManufacturerApp:
 
         return sheet, n, cell_w, cell_h, cols, rows
 
-    def _atlas_update(self, *_):
-        if self.atlas_img is None: return
+    def _atlas_build_internal(self):
+        """Вызывает сборку и обновляет превью без повторной детекции."""
         try:
             sheet, n, cell_w, cell_h, cols, rows = self._atlas_build()
         except tk.TclError:
             return
+        self._atlas_apply_result(sheet, n, cell_w, cell_h, cols, rows)
+
+    def _atlas_apply_result(self, sheet, n, cell_w, cell_h, cols, rows):
         removed = getattr(self, "_atlas_removed", 0)
-        cnt_txt = f"Найдено объектов: {n + removed}"
+        total   = len(self._atlas_raws)
+        n_exc   = len(self.atlas_excluded)
+        cnt_txt = f"Найдено объектов: {total}"
+        if n_exc:
+            cnt_txt += f"  (исключено: {n_exc})"
         if removed:
-            cnt_txt += f"  (убрано дубл.: {removed})"
+            cnt_txt += f"  (дубл.: {removed})"
         self.atlas_lbl_cnt.config(text=cnt_txt)
         dedup_txt = f"Удалено дубликатов: {removed}" if removed else ""
         self.atlas_lbl_dedup.config(text=dedup_txt)
@@ -1664,19 +1776,19 @@ class SpriteManufacturerApp:
             self.atlas_btn_save.config(state=tk.DISABLED)
             return
 
-        self._atlas_cell_w  = cell_w
-        self._atlas_cell_h  = cell_h
-        self._atlas_cols_n  = cols
-        self._atlas_rows_n  = rows
+        self._atlas_cell_w = cell_w
+        self._atlas_cell_h = cell_h
+        self._atlas_cols_n = cols
+        self._atlas_rows_n = rows
 
-        # Строим full-res визуализацию с сеткой ячеек
         vis = Image.new("RGB", sheet.size, (30, 33, 36))
         vis.paste(sheet, (0, 0), sheet)
         draw = ImageDraw.Draw(vis)
         for r in range(rows):
             for c in range(cols):
                 x, y = c * cell_w, r * cell_h
-                draw.rectangle([x, y, x + cell_w - 1, y + cell_h - 1], outline="#00e050", width=1)
+                draw.rectangle([x, y, x + cell_w - 1, y + cell_h - 1],
+                                outline="#00e050", width=1)
         self._atlas_vis = vis
 
         cell_txt = f"{cell_w}×{cell_h}" if cell_w != cell_h else f"{cell_w}"
@@ -1684,6 +1796,16 @@ class SpriteManufacturerApp:
             text=f"{sheet.width}×{sheet.height} px  |  {cols}×{rows} ячеек  |  {cell_txt} px/яч")
         self.atlas_btn_save.config(state=tk.NORMAL if self.atlas_outdir else tk.DISABLED)
         self._atlas_render_canvas()
+
+    def _atlas_update(self, *_):
+        if self.atlas_img is None: return
+        try:
+            self._atlas_detect_raws()
+            self._atlas_refresh_tray()
+            sheet, n, cell_w, cell_h, cols, rows = self._atlas_build()
+        except tk.TclError:
+            return
+        self._atlas_apply_result(sheet, n, cell_w, cell_h, cols, rows)
 
     def _atlas_render_canvas(self):
         if self._atlas_vis is None:
@@ -2529,6 +2651,9 @@ class SpriteManufacturerApp:
         self.atlas_dedup.set(False)
         self.atlas_dedup_thresh.set(95)
         self._atlas_removed = 0
+        self.atlas_excluded = set()
+        self._atlas_raws    = []
+        self._tray_photos   = []
         self.atlas_cols.set(8)
         self.atlas_name.set("atlas")
         self._atlas_name_manual = False
@@ -2537,11 +2662,13 @@ class SpriteManufacturerApp:
         self.atlas_lbl_out.config(text="Папка не выбрана")
         self.atlas_lbl_cnt.config(text="Найдено объектов: 0")
         self.atlas_lbl_dedup.config(text="")
+        self.atlas_tray_lbl.config(text="")
         self.atlas_lbl_size.config(text="Размер атласа: — (авторасчёт)")
         self.atlas_lbl_zoom.config(text="100%")
         self.atlas_btn_save.config(state=tk.DISABLED)
         self.atlas_btn_overwrite.config(state=tk.DISABLED)
         # Превью
+        self.atlas_tray.delete("all")
         self.atlas_canvas.delete("all")
         self._atlas_render_canvas()
 
