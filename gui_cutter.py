@@ -1,6 +1,23 @@
 """
-ИИ Разделитель Спрайтов
+ИИ Разделитель Спрайтов v2
 Автор: Shtillgor (https://midgro.uz/)
+
+Инструмент для автоматической нарезки спрайтов, тайлов и атласов из растровых изображений.
+
+ВОЗМОЖНОСТИ:
+  • Авто-нарезка спрайтов по альфа-каналу / яркости (вкладка «Авто»)
+  • Ручная нарезка прямоугольными зонами (вкладка «Ручная»)
+  • Разбивка тайловой сетки с предпросмотром (вкладка «Тайлы»)
+  • Сборка спрайт-атласа из исходного изображения (вкладка «Атлас»)
+    - выравнивание по ширине и/или высоте
+    - морфологическое разделение слипшихся спрайтов (ползунок «Разделение»)
+    - перезапись уже сохранённого файла атласа
+  • Drag-and-drop файлов на любую вкладку
+  • Вставка из буфера обмена (Ctrl+V) на любой вкладке
+  • Масштабирование и панорамирование предпросмотра (колёсико + ЛКМ)
+
+ЗАВИСИМОСТИ:
+  Python 3.10+, opencv-python, Pillow, numpy, tkinterdnd2
 
 ЛИЦЕНЗИЯ:
 Данное ПО можно использовать свободно при условии обязательного указания автора
@@ -10,10 +27,13 @@
 import cv2
 import numpy as np
 import os
+import io
 import json
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk, ImageDraw
+from tkinterdnd2 import TkinterDnD, DND_FILES
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -71,6 +91,9 @@ class SpriteCutterApp:
         self._build_mgr()
         self._build_atlas()
         self._build_tilecheck()
+
+        self.root.bind('<Control-v>', self._global_paste)
+        self.root.bind('<Control-V>', self._global_paste)
 
     # ═══════════════════════════════════════════════════════════════
     #  ОБЩИЕ УТИЛИТЫ
@@ -181,6 +204,68 @@ class SpriteCutterApp:
                     pass
         return (max(idxs) + 1) if idxs else 0
 
+    _IMG_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+
+    def _parse_drop_paths(self, data):
+        """Разбирает строку tkinterdnd2 в список путей (учитывает {пути с пробелами})."""
+        paths = []
+        data = data.strip()
+        i = 0
+        while i < len(data):
+            if data[i] == '{':
+                try:
+                    j = data.index('}', i)
+                    paths.append(data[i+1:j])
+                    i = j + 1
+                except ValueError:
+                    break
+            elif data[i] == ' ':
+                i += 1
+            else:
+                j = data.find(' ', i)
+                if j == -1:
+                    paths.append(data[i:])
+                    break
+                paths.append(data[i:j])
+                i = j
+        return [p for p in paths if p]
+
+    def _setup_dnd(self, widget, on_drop, *, multi=False):
+        """Регистрирует виджет как цель дроп-операции с подсветкой при наведении."""
+        widget.drop_target_register(DND_FILES)
+
+        def _enter(e):
+            try:
+                widget.config(highlightthickness=3, highlightbackground=GRN)
+            except tk.TclError:
+                pass
+
+        def _leave(e):
+            try:
+                widget.config(highlightthickness=0)
+            except tk.TclError:
+                pass
+
+        def _drop(e):
+            try:
+                widget.config(highlightthickness=0)
+            except tk.TclError:
+                pass
+            paths = self._parse_drop_paths(e.data)
+            if not paths:
+                return
+            if multi:
+                on_drop(paths)
+            else:
+                for p in paths:
+                    if p.lower().endswith(self._IMG_EXTS) or os.path.isdir(p):
+                        on_drop(p)
+                        break
+
+        widget.dnd_bind('<<DragEnter>>', _enter)
+        widget.dnd_bind('<<DragLeave>>', _leave)
+        widget.dnd_bind('<<Drop>>', _drop)
+
     # ═══════════════════════════════════════════════════════════════
     #  ВКЛАДКА 1 — АВТО-НАРЕЗЧИК
     # ═══════════════════════════════════════════════════════════════
@@ -194,6 +279,9 @@ class SpriteCutterApp:
         self._btn(sb, "Выбрать картинки (PNG/JPG)", self.auto_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.auto_lbl_in = self._lbl(sb, "Файлы не выбраны", color=FG2)
         self.auto_lbl_in.pack(anchor=tk.W)
+        row_pc = tk.Frame(sb, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
+        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_auto, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
+        self._btn(row_pc, "Очистить",         self.auto_clear,  RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
 
         self._btn(sb, "Папка сохранения", self.auto_out_dir).pack(fill=tk.X, pady=(10, 3))
         self._lbl(sb, "Недавние папки:").pack(anchor=tk.W)
@@ -230,6 +318,13 @@ class SpriteCutterApp:
         self.auto_pad.pack(fill=tk.X)
         self.auto_pad.bind("<ButtonRelease-1>", lambda _: self._auto_process())
 
+        self._lbl(sb, "Разделение объектов (эрозия, пикс):").pack(anchor=tk.W, pady=(8, 0))
+        self.auto_sep = tk.Scale(sb, from_=0, to=150, orient=tk.HORIZONTAL,
+                                 bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
+        self.auto_sep.set(0)
+        self.auto_sep.pack(fill=tk.X)
+        self.auto_sep.bind("<ButtonRelease-1>", lambda _: self._auto_process())
+
         self.auto_lbl_cnt = self._lbl(sb, "Найдено объектов: 0", color=GOLD, bold=True)
         self.auto_lbl_cnt.pack(anchor=tk.W, pady=8)
 
@@ -251,9 +346,10 @@ class SpriteCutterApp:
         self._btn(row, "Инструкция", self._show_help).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         self._btn(row, "Автор",      self._show_author).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        self.auto_preview = tk.Label(area, text="Выберите изображение", bg="#1e2124", fg=FG2,
-                                     font=("Arial", 14))
+        self.auto_preview = tk.Label(area, text="Выберите изображение\nили перетащите файл(ы) сюда",
+                                     bg="#1e2124", fg=FG2, font=("Arial", 14))
         self.auto_preview.pack(fill=tk.BOTH, expand=True)
+        self._setup_dnd(self.auto_preview, self._auto_dnd_load, multi=True)
 
         self.auto_paths  = []
         self.auto_idx    = 0
@@ -309,7 +405,10 @@ class SpriteCutterApp:
         self.auto_orig = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         self._auto_process()
 
-    def _auto_contours(self, img, tv, ms):
+    def _auto_contours(self, img, tv, ms, sep=0):
+        """Находит контуры объектов.
+        sep>0: эродирует маску на sep пикселей перед поиском (разделяет соприкасающиеся объекты),
+        затем расширяет bounding box обратно — итоговый кроп полный."""
         if img is None: return []
         if len(img.shape) == 3 and img.shape[2] == 4:
             alpha = img[:, :, 3]
@@ -321,15 +420,44 @@ class SpriteCutterApp:
                 _, th = cv2.threshold(gray, 255 - tv, 255, cv2.THRESH_BINARY)
             else:
                 _, th = cv2.threshold(gray, tv, 255, cv2.THRESH_BINARY_INV)
-        raw, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return [c for c in raw if cv2.boundingRect(c)[2] >= ms and cv2.boundingRect(c)[3] >= ms]
+
+        if sep > 0:
+            k = sep * 2 + 1
+            kernel = np.ones((k, k), np.uint8)
+            th_work = cv2.erode(th, kernel, iterations=1)
+        else:
+            th_work = th
+
+        raw, _ = cv2.findContours(th_work, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if sep == 0:
+            return [c for c in raw if cv2.boundingRect(c)[2] >= ms and cv2.boundingRect(c)[3] >= ms]
+
+        # Расширяем bbox обратно до исходного размера и кодируем как прямоугольный контур,
+        # чтобы cv2.boundingRect() отдавал правильные координаты всем вызывающим сторонам
+        ih, iw = img.shape[:2]
+        result = []
+        for c in raw:
+            x, y, w, h = cv2.boundingRect(c)
+            if w < ms or h < ms:
+                continue
+            x2 = min(iw, x + w + sep)
+            y2 = min(ih, y + h + sep)
+            x  = max(0, x - sep)
+            y  = max(0, y - sep)
+            w, h = x2 - x, y2 - y
+            fake = np.array([[[x, y]], [[x+w-1, y]], [[x+w-1, y+h-1]], [[x, y+h-1]]],
+                            dtype=np.int32)
+            result.append(fake)
+        return result
 
     def _auto_process(self):
         img = self.auto_orig
         if img is None: return
-        tv = self.auto_thresh.get()
-        ms = self.auto_min.get()
-        contours = self._auto_contours(img, tv, ms)
+        tv  = self.auto_thresh.get()
+        ms  = self.auto_min.get()
+        sep = self.auto_sep.get()
+        contours = self._auto_contours(img, tv, ms, sep=sep)
         self.auto_lbl_cnt.config(text=f"Найдено объектов: {len(contours)}")
 
         vis = img.copy()
@@ -348,15 +476,16 @@ class SpriteCutterApp:
         if not self.auto_paths or not self.auto_outdir:
             messagebox.showwarning("Ошибка", "Выберите файлы и папку сохранения")
             return
-        tv = self.auto_thresh.get()
-        ms = self.auto_min.get()
+        tv  = self.auto_thresh.get()
+        ms  = self.auto_min.get()
         pad = self.auto_pad.get()
+        sep = self.auto_sep.get()
         idx = self._next_idx(self.auto_outdir, "sprite_")
         saved = 0
         for path in self.auto_paths:
             img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
             if img is None: continue
-            contours = self._auto_contours(img, tv, ms)
+            contours = self._auto_contours(img, tv, ms, sep=sep)
             ih, iw = img.shape[:2]
             rgba = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA) if len(img.shape) == 3 and img.shape[2] == 3 else img.copy()
             for c in contours:
@@ -371,6 +500,18 @@ class SpriteCutterApp:
                 saved += 1
         messagebox.showinfo("Готово!", f"Сохранено {saved} спрайтов в:\n{self.auto_outdir}")
 
+    def _auto_dnd_load(self, paths):
+        img_paths = [p for p in paths if p.lower().endswith(self._IMG_EXTS)]
+        if not img_paths:
+            return
+        self.auto_paths = img_paths
+        self.auto_idx = 0
+        if not self.auto_outdir:
+            self.auto_outdir = os.path.dirname(img_paths[0])
+            self.auto_lbl_out.config(text=self.auto_outdir)
+            self._add_recent(self.auto_outdir)
+        self._auto_display()
+
     # ═══════════════════════════════════════════════════════════════
     #  ВКЛАДКА 2 — ТАЙЛОВАЯ СЕТКА
     # ═══════════════════════════════════════════════════════════════
@@ -384,6 +525,9 @@ class SpriteCutterApp:
         self._btn(sb, "Открыть тайлсет (PNG/JPG)", self.tile_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.tile_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
         self.tile_lbl_file.pack(anchor=tk.W)
+        row_pc = tk.Frame(sb, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
+        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_tile, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
+        self._btn(row_pc, "Очистить",         self.tile_clear,  RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
 
         self._sep(sb)
         self._lbl(sb, "2. Параметры сетки", bold=True).pack(anchor=tk.W, pady=(0, 6))
@@ -448,14 +592,16 @@ class SpriteCutterApp:
         self.tile_canvas = tk.Canvas(area, bg="#1e2124", highlightthickness=0)
         self.tile_canvas.pack(fill=tk.BOTH, expand=True)
         self.tile_canvas.bind("<Configure>", lambda _: self._tile_update())
+        self._setup_dnd(self.tile_canvas, self.tile_open)
 
         self.tile_img   = None
         self.tile_outdir = ""
         self.tile_photo = None
 
-    def tile_open(self):
-        path = filedialog.askopenfilename(
-            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
+    def tile_open(self, path=None):
+        if path is None:
+            path = filedialog.askopenfilename(
+                filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
         if not path: return
         self.tile_img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         self.tile_lbl_file.config(text=f"{os.path.basename(path)}  "
@@ -511,7 +657,14 @@ class SpriteCutterApp:
         return float(gray.std()) < 3.0
 
     def _tile_update(self, *_):
-        if self.tile_img is None: return
+        if self.tile_img is None:
+            cw = self.tile_canvas.winfo_width() or 700
+            ch = self.tile_canvas.winfo_height() or 500
+            self.tile_canvas.delete("all")
+            self.tile_canvas.create_text(cw // 2, ch // 2,
+                text="Откройте тайлсет или перетащите файл сюда",
+                fill=FG2, font=("Arial", 13), justify=tk.CENTER)
+            return
         tiles = self._tile_grid()
         skip  = self.tile_skip.get()
         img   = self.tile_img
@@ -565,6 +718,9 @@ class SpriteCutterApp:
         self._btn(sb, "Открыть изображение", self.shape_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.shape_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
         self.shape_lbl_file.pack(anchor=tk.W)
+        row_pc = tk.Frame(sb, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
+        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_shape,  BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
+        self._btn(row_pc, "Очистить",         self.shape_clear_all, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
 
         self._sep(sb)
         self._lbl(sb, "2. Инструмент", bold=True).pack(anchor=tk.W, pady=(0, 5))
@@ -616,6 +772,7 @@ class SpriteCutterApp:
         self.shape_cv.bind("<ButtonPress-3>",   self._sh_finish)
         self.shape_cv.bind("<Motion>",          self._sh_move)
         self.shape_cv.bind("<Configure>",       lambda _: self._shape_render())
+        self._setup_dnd(self.shape_cv, self.shape_open)
         self.root.bind("<Escape>", lambda _: self._shape_reset())
 
         self.shape_img    = None
@@ -739,7 +896,14 @@ class SpriteCutterApp:
         self._shape_render()
 
     def _shape_render(self, rect_end=None, poly_cur=None):
-        if self.shape_pil is None: return
+        if self.shape_pil is None:
+            cw = self.shape_cv.winfo_width() or 700
+            ch = self.shape_cv.winfo_height() or 500
+            self.shape_cv.delete("all")
+            self.shape_cv.create_text(cw // 2, ch // 2,
+                text="Откройте изображение или перетащите файл сюда",
+                fill=FG2, font=("Arial", 13), justify=tk.CENTER)
+            return
         iw, ih = self.shape_pil.size
         cw = self.shape_cv.winfo_width()  or 700
         ch = self.shape_cv.winfo_height() or 600
@@ -825,6 +989,9 @@ class SpriteCutterApp:
         self._btn(sb, "Добавить отдельные файлы", self.mgr_add_files).pack(fill=tk.X, pady=3)
         self.mgr_lbl_loaded = self._lbl(sb, "Загружено: 0", color=FG2)
         self.mgr_lbl_loaded.pack(anchor=tk.W)
+        row_pc = tk.Frame(sb, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
+        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_mgr,  BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
+        self._btn(row_pc, "Очистить всё",     self.mgr_clear_all, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
 
         self._sep(sb)
         self._lbl(sb, "2. Управление выборкой", bold=True).pack(anchor=tk.W, pady=(0, 5))
@@ -893,6 +1060,8 @@ class SpriteCutterApp:
         self.mgr_inner.bind("<MouseWheel>", self._mgr_scroll)
         self.mgr_inner.bind("<Button-4>",   self._mgr_scroll)
         self.mgr_inner.bind("<Button-5>",   self._mgr_scroll)
+        self._setup_dnd(self.mgr_canvas, self._mgr_dnd_load, multi=True)
+        self._setup_dnd(self.mgr_inner,  self._mgr_dnd_load, multi=True)
 
         self.mgr_sprites = []   # [{"path", "img":PIL, "var":BoolVar, "thumb":PhotoImage}]
         self.mgr_outdir  = ""
@@ -933,6 +1102,25 @@ class SpriteCutterApp:
         if not paths: return
         for p in paths:
             self._mgr_add(p)
+        self._mgr_rebuild()
+        self._mgr_upd()
+
+    def _mgr_dnd_load(self, paths):
+        for p in paths:
+            if os.path.isdir(p):
+                folder_paths = sorted(
+                    os.path.join(p, f) for f in os.listdir(p)
+                    if f.lower().endswith(self._IMG_EXTS))
+                for fp in folder_paths:
+                    self._mgr_add(fp)
+                if not self.mgr_outdir:
+                    self.mgr_outdir = p
+                    self.mgr_lbl_out.config(text=p)
+            elif p.lower().endswith(self._IMG_EXTS):
+                self._mgr_add(p)
+                if not self.mgr_outdir:
+                    self.mgr_outdir = os.path.dirname(p)
+                    self.mgr_lbl_out.config(text=self.mgr_outdir)
         self._mgr_rebuild()
         self._mgr_upd()
 
@@ -1078,6 +1266,9 @@ class SpriteCutterApp:
         self._btn(sb, "Открыть картинку (без фона)", self.atlas_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.atlas_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
         self.atlas_lbl_file.pack(anchor=tk.W)
+        row_pc = tk.Frame(sb, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
+        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_atlas, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
+        self._btn(row_pc, "Очистить",         self.atlas_clear,  RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
 
         self._sep(sb)
         self._lbl(sb, "2. Поиск объектов", bold=True).pack(anchor=tk.W, pady=(0, 5))
@@ -1095,6 +1286,13 @@ class SpriteCutterApp:
         self.atlas_min.set(12)
         self.atlas_min.pack(fill=tk.X)
         self.atlas_min.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
+
+        self._lbl(sb, "Разделение объектов (эрозия, пикс):").pack(anchor=tk.W, pady=(8, 0))
+        self.atlas_sep = tk.Scale(sb, from_=0, to=150, orient=tk.HORIZONTAL,
+                                  bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
+        self.atlas_sep.set(0)
+        self.atlas_sep.pack(fill=tk.X)
+        self.atlas_sep.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
 
         self.atlas_lbl_cnt = self._lbl(sb, "Найдено объектов: 0", color=GOLD, bold=True)
         self.atlas_lbl_cnt.pack(anchor=tk.W, pady=6)
@@ -1125,6 +1323,17 @@ class SpriteCutterApp:
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(anchor=tk.W)
 
+        self._lbl(sb, "Выравнивание спрайтов:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
+        alf = tk.Frame(sb, bg=BG); alf.pack(fill=tk.X)
+        self.atlas_align_w = tk.BooleanVar(value=True)
+        self.atlas_align_h = tk.BooleanVar(value=True)
+        tk.Checkbutton(alf, text="По ширине", variable=self.atlas_align_w,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_update).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(alf, text="По высоте", variable=self.atlas_align_h,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_update).pack(side=tk.LEFT)
+
         self._sep(sb)
         self._lbl(sb, "4. Компоновка атласа", bold=True).pack(anchor=tk.W, pady=(0, 5))
 
@@ -1143,6 +1352,14 @@ class SpriteCutterApp:
         self.atlas_lbl_size = self._lbl(sb, "Размер атласа: — (авторасчёт)", color=FG2)
         self.atlas_lbl_size.pack(anchor=tk.W)
 
+        zf = tk.Frame(sb, bg=BG)
+        zf.pack(fill=tk.X, pady=(4, 0))
+        self._lbl(zf, "Зум:").pack(side=tk.LEFT)
+        self.atlas_lbl_zoom = self._lbl(zf, "100%", color=GOLD)
+        self.atlas_lbl_zoom.pack(side=tk.LEFT, padx=6)
+        self._btn(zf, "↺", self._atlas_zoom_reset, h=1).pack(side=tk.RIGHT)
+        self._lbl(sb, "Колёсико — зум  |  ЛКМ — двигать", color=FG2, size=8).pack(anchor=tk.W, pady=(2, 0))
+
         self._sep(sb)
         self._btn(sb, "Папка сохранения", self.atlas_out_dir).pack(fill=tk.X)
         self.atlas_lbl_out = self._lbl(sb, "Папка не выбрана", color=FG2)
@@ -1155,25 +1372,50 @@ class SpriteCutterApp:
         self.atlas_name_entry.pack(fill=tk.X, pady=(2, 0))
         self.atlas_name_entry.bind("<KeyRelease>", lambda _: setattr(self, "_atlas_name_manual", True))
 
-        self.atlas_btn_save = self._btn(sb, "СОБРАТЬ И СОХРАНИТЬ АТЛАС", self.atlas_save,
+        btm_save = tk.Frame(sb, bg=BG)
+        btm_save.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 6))
+        self.atlas_btn_save = self._btn(btm_save, "СОБРАТЬ И СОХРАНИТЬ АТЛАС", self.atlas_save,
                                         ACC, h=2, state=tk.DISABLED)
-        self.atlas_btn_save.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        self.atlas_btn_save.pack(fill=tk.X, pady=(0, 4))
+        self.atlas_btn_overwrite = self._btn(btm_save, "↺  Перезаписать текущий файл",
+                                             self.atlas_overwrite, GOLD, state=tk.DISABLED)
+        self.atlas_btn_overwrite.pack(fill=tk.X)
 
-        self.atlas_canvas = tk.Canvas(area, bg="#1e2124", highlightthickness=0)
+        self.atlas_canvas = tk.Canvas(area, bg="#1e2124", highlightthickness=0, cursor="fleur")
         self.atlas_canvas.pack(fill=tk.BOTH, expand=True)
-        self.atlas_canvas.bind("<Configure>", lambda _: self._atlas_update())
+        self.atlas_canvas.bind("<Configure>",       lambda _: self._atlas_render_canvas())
+        self.atlas_canvas.bind("<MouseWheel>",      self._atlas_wheel)
+        self.atlas_canvas.bind("<Button-4>",        self._atlas_wheel)
+        self.atlas_canvas.bind("<Button-5>",        self._atlas_wheel)
+        self.atlas_canvas.bind("<ButtonPress-1>",   self._atlas_pan_press)
+        self.atlas_canvas.bind("<B1-Motion>",       self._atlas_pan_drag)
+        self.atlas_canvas.bind("<ButtonRelease-1>", self._atlas_pan_release)
+        self._setup_dnd(self.atlas_canvas, self.atlas_open)
 
         self.atlas_img    = None
         self.atlas_outdir = ""
         self.atlas_photo  = None
-        self.atlas_sheet  = None   # собранный атлас (PIL RGBA, полное разрешение)
+        self.atlas_sheet  = None
         self.atlas_count  = 0
-        self.atlas_src_path    = None
+        self.atlas_src_path     = None
         self._atlas_name_manual = False
+        self._atlas_last_out    = None   # путь последнего сохранённого файла
+        self._atlas_vis         = None   # full-res PIL с сеткой ячеек
+        self._atlas_cell_w      = 64
+        self._atlas_cell_h      = 64
+        self._atlas_cols_n      = 0
+        self._atlas_rows_n      = 0
+        self._atlas_ox          = 0
+        self._atlas_oy          = 0
+        self._atlas_pan0        = None
+        self.atlas_zoom         = 1.0
+        self.atlas_view_x       = 0
+        self.atlas_view_y       = 0
 
-    def atlas_open(self):
-        path = filedialog.askopenfilename(
-            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
+    def atlas_open(self, path=None):
+        if path is None:
+            path = filedialog.askopenfilename(
+                filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
         if not path: return
         self.atlas_img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         self.atlas_src_path = path
@@ -1184,6 +1426,11 @@ class SpriteCutterApp:
             self.atlas_lbl_out.config(text=self.atlas_outdir)
             self._add_recent(self.atlas_outdir)
         self._atlas_name_manual = False
+        self.atlas_zoom    = 1.0
+        self.atlas_view_x  = 0
+        self.atlas_view_y  = 0
+        self._atlas_vis    = None
+        self.atlas_lbl_zoom.config(text="100%")
         self._atlas_suggest_name()
         self._atlas_update()
 
@@ -1216,101 +1463,208 @@ class SpriteCutterApp:
         self._atlas_update()
 
     def _atlas_build(self):
-        """Находит объекты, выравнивает каждый в ячейку и собирает атлас
-        без зазоров — атлас строго кратен размеру ячейки (cols*cell × rows*cell).
-        Возвращает (PIL RGBA атлас, кол-во объектов, ячейка, столбцы, строки)
-        либо (None, 0, ..., ...) если объектов нет."""
+        """Находит объекты и собирает атлас.
+        Возвращает (PIL RGBA, кол-во, cell_w, cell_h, cols, rows) или (None, 0, ...) если пусто."""
         img = self.atlas_img
         cell0 = max(4, self.atlas_cell.get())
-        if img is None: return None, 0, cell0, 0, 0
-        tv = self.atlas_thresh.get()
-        ms = self.atlas_min.get()
-        contours = self._auto_contours(img, tv, ms)
-        if not contours: return None, 0, cell0, 0, 0
+        if img is None: return None, 0, cell0, cell0, 0, 0
+        tv    = self.atlas_thresh.get()
+        ms    = self.atlas_min.get()
+        sep   = max(0, self.atlas_sep.get())
+        contours = self._auto_contours(img, tv, ms, sep=sep)
+        if not contours: return None, 0, cell0, cell0, 0, 0
 
-        cell = cell0
-        cols = max(1, self.atlas_cols.get())
-        fit  = self.atlas_scale_fit.get()
-        no_up = self.atlas_no_upscale.get()
+        cols   = max(1, self.atlas_cols.get())
+        fit    = self.atlas_scale_fit.get()
+        no_up  = self.atlas_no_upscale.get()
+        norm_w = self.atlas_align_w.get()
+        norm_h = self.atlas_align_h.get()
 
         rgba = (cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
                 if len(img.shape) == 3 and img.shape[2] == 3 else img.copy())
 
-        # сортировка объектов сверху-вниз, слева-направо (по строкам исходной картинки)
         boxes = [cv2.boundingRect(c) for c in contours]
-        boxes.sort(key=lambda b: (b[1] // max(1, cell), b[0]))
+        boxes.sort(key=lambda b: (b[1] // max(1, cell0), b[0]))
 
-        tiles = []
+        # 1-й проход: собираем исходные PIL-кропы
+        raws = []
         for (x, y, w, h) in boxes:
             crop = rgba[y:y+h, x:x+w]
-            pil = self._cv2pil(crop).convert("RGBA")
+            raws.append(self._cv2pil(crop).convert("RGBA"))
+
+        # Определяем размер ячейки
+        max_w = max(p.width  for p in raws)
+        max_h = max(p.height for p in raws)
+        cell_w = cell0 if norm_w else max_w
+        cell_h = cell0 if norm_h else max_h
+
+        # 2-й проход: масштабируем спрайты
+        tiles = []
+        for pil in raws:
             if fit:
-                scale = min(cell / pil.width, cell / pil.height)
+                if norm_w and norm_h:
+                    scale = min(cell_w / pil.width, cell_h / pil.height)
+                elif norm_w:
+                    scale = cell_w / pil.width
+                elif norm_h:
+                    scale = cell_h / pil.height
+                else:
+                    scale = 1.0
                 if no_up:
                     scale = min(scale, 1.0)
                 if scale != 1.0:
-                    nw = max(1, round(pil.width * scale))
+                    nw = max(1, round(pil.width  * scale))
                     nh = max(1, round(pil.height * scale))
                     pil = pil.resize((nw, nh), Image.LANCZOS)
-            elif pil.width > cell or pil.height > cell:
-                l = max(0, (pil.width  - cell) // 2)
-                t = max(0, (pil.height - cell) // 2)
-                pil = pil.crop((l, t, l + min(cell, pil.width), t + min(cell, pil.height)))
+            else:
+                # Без масштабирования — только обрезка если больше ячейки
+                if pil.width > cell_w or pil.height > cell_h:
+                    l = max(0, (pil.width  - cell_w) // 2)
+                    t = max(0, (pil.height - cell_h) // 2)
+                    pil = pil.crop((l, t, l + min(cell_w, pil.width),
+                                         t + min(cell_h, pil.height)))
             tiles.append(pil)
 
-        n = len(tiles)
+        # Подгоняем cell_w/cell_h под реальные размеры после масштабирования
+        if not norm_w:
+            cell_w = max(t.width  for t in tiles)
+        if not norm_h:
+            cell_h = max(t.height for t in tiles)
+
+        n    = len(tiles)
         cols = min(cols, n)
         rows = (n + cols - 1) // cols
-        sheet = Image.new("RGBA", (cols * cell, rows * cell), (0, 0, 0, 0))
+        sheet = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
 
         for i, pil in enumerate(tiles):
             r, c = divmod(i, cols)
-            cx = c * cell
-            cy = r * cell
-            ox = cx + (cell - pil.width)  // 2
-            oy = cy + (cell - pil.height) // 2
+            ox = c * cell_w + (cell_w - pil.width)  // 2
+            oy = r * cell_h + (cell_h - pil.height) // 2
             sheet.paste(pil, (ox, oy), pil)
 
-        return sheet, n, cell, cols, rows
+        return sheet, n, cell_w, cell_h, cols, rows
 
     def _atlas_update(self, *_):
         if self.atlas_img is None: return
         try:
-            sheet, n, cell, cols, rows = self._atlas_build()
+            sheet, n, cell_w, cell_h, cols, rows = self._atlas_build()
         except tk.TclError:
-            # переменная спинбокса временно пуста/невалидна во время ручного ввода
             return
         self.atlas_lbl_cnt.config(text=f"Найдено объектов: {n}")
         self.atlas_sheet = sheet
         self.atlas_count = n
 
         if sheet is None:
+            self._atlas_vis = None
+            cw = self.atlas_canvas.winfo_width() or 700
+            ch = self.atlas_canvas.winfo_height() or 500
             self.atlas_canvas.delete("all")
+            if self.atlas_img is None:
+                self.atlas_canvas.create_text(cw // 2, ch // 2,
+                    text="Откройте изображение или перетащите файл сюда",
+                    fill=FG2, font=("Arial", 13), justify=tk.CENTER)
             self.atlas_lbl_size.config(text="Размер атласа: — (авторасчёт)")
             self.atlas_btn_save.config(state=tk.DISABLED)
             return
 
-        self.atlas_lbl_size.config(text=f"Размер атласа: {sheet.width}×{sheet.height} (авторасчёт)")
+        self._atlas_cell_w  = cell_w
+        self._atlas_cell_h  = cell_h
+        self._atlas_cols_n  = cols
+        self._atlas_rows_n  = rows
 
-        # рисуем сетку границ ячеек прямо на превью атласа
+        # Строим full-res визуализацию с сеткой ячеек
         vis = Image.new("RGB", sheet.size, (30, 33, 36))
         vis.paste(sheet, (0, 0), sheet)
         draw = ImageDraw.Draw(vis)
         for r in range(rows):
             for c in range(cols):
-                x = c * cell
-                y = r * cell
-                draw.rectangle([x, y, x + cell - 1, y + cell - 1], outline="#00e050", width=1)
+                x, y = c * cell_w, r * cell_h
+                draw.rectangle([x, y, x + cell_w - 1, y + cell_h - 1], outline="#00e050", width=1)
+        self._atlas_vis = vis
 
-        cw = self.atlas_canvas.winfo_width()  or 700
-        ch = self.atlas_canvas.winfo_height() or 600
-        preview = vis
-        preview.thumbnail((cw, ch), Image.LANCZOS)
-        self.atlas_photo = ImageTk.PhotoImage(preview)
-        self.atlas_canvas.delete("all")
-        self.atlas_canvas.create_image(cw // 2, ch // 2, anchor=tk.CENTER, image=self.atlas_photo)
-
+        cell_txt = f"{cell_w}×{cell_h}" if cell_w != cell_h else f"{cell_w}"
+        self.atlas_lbl_size.config(
+            text=f"{sheet.width}×{sheet.height} px  |  {cols}×{rows} ячеек  |  {cell_txt} px/яч")
         self.atlas_btn_save.config(state=tk.NORMAL if self.atlas_outdir else tk.DISABLED)
+        self._atlas_render_canvas()
+
+    def _atlas_render_canvas(self):
+        if self._atlas_vis is None:
+            cw = self.atlas_canvas.winfo_width() or 700
+            ch = self.atlas_canvas.winfo_height() or 500
+            self.atlas_canvas.delete("all")
+            if self.atlas_img is None:
+                self.atlas_canvas.create_text(cw // 2, ch // 2,
+                    text="Откройте изображение или перетащите файл сюда",
+                    fill=FG2, font=("Arial", 13), justify=tk.CENTER)
+            return
+
+        vis = self._atlas_vis
+        cw = self.atlas_canvas.winfo_width() or 700
+        ch = self.atlas_canvas.winfo_height() or 600
+
+        fit   = min(cw / vis.width, ch / vis.height)
+        scale = fit * self.atlas_zoom
+        nw    = max(1, int(vis.width  * scale))
+        nh    = max(1, int(vis.height * scale))
+
+        self._atlas_ox = (cw - nw) // 2 + self.atlas_view_x
+        self._atlas_oy = (ch - nh) // 2 + self.atlas_view_y
+
+        resamp = Image.NEAREST if scale > 2 else Image.LANCZOS
+        display = vis.resize((nw, nh), resamp)
+        self.atlas_photo = ImageTk.PhotoImage(display)
+        self.atlas_canvas.delete("all")
+        self.atlas_canvas.create_image(self._atlas_ox, self._atlas_oy,
+                                       anchor=tk.NW, image=self.atlas_photo)
+
+        # Оверлей с размером атласа в правом нижнем углу
+        cell_txt = (f"{self._atlas_cell_w}×{self._atlas_cell_h}"
+                    if self._atlas_cell_w != self._atlas_cell_h else f"{self._atlas_cell_w}")
+        info = (f"{vis.width}×{vis.height} px  "
+                f"{self._atlas_cols_n}×{self._atlas_rows_n}  "
+                f"{cell_txt}px/яч")
+        self.atlas_canvas.create_text(cw - 8, ch - 8, text=info, anchor=tk.SE,
+                                      fill=GOLD, font=("Arial", 9, "bold"))
+
+    def _atlas_wheel(self, e):
+        if self._atlas_vis is None: return
+        self.atlas_canvas.focus_set()
+        factor = 1.15 if (getattr(e, "delta", 0) > 0 or e.num == 4) else 1 / 1.15
+        vis = self._atlas_vis
+        cw  = self.atlas_canvas.winfo_width() or 700
+        ch  = self.atlas_canvas.winfo_height() or 600
+        fit = min(cw / vis.width, ch / vis.height)
+        old_scale = fit * self.atlas_zoom
+        ix = (e.x - self._atlas_ox) / old_scale
+        iy = (e.y - self._atlas_oy) / old_scale
+        self.atlas_zoom = max(0.1, min(30.0, self.atlas_zoom * factor))
+        ns = fit * self.atlas_zoom
+        self.atlas_view_x = int(e.x - ix * ns - (cw - int(vis.width  * ns)) // 2)
+        self.atlas_view_y = int(e.y - iy * ns - (ch - int(vis.height * ns)) // 2)
+        self.atlas_lbl_zoom.config(text=f"{int(self.atlas_zoom * 100)}%")
+        self._atlas_render_canvas()
+
+    def _atlas_pan_press(self, e):
+        self.atlas_canvas.focus_set()
+        self._atlas_pan0 = (e.x, e.y, self.atlas_view_x, self.atlas_view_y)
+
+    def _atlas_pan_drag(self, e):
+        if self._atlas_pan0 is None: return
+        sx, sy, vx0, vy0 = self._atlas_pan0
+        self.atlas_view_x = vx0 + (e.x - sx)
+        self.atlas_view_y = vy0 + (e.y - sy)
+        self._atlas_render_canvas()
+
+    def _atlas_pan_release(self, _=None):
+        self._atlas_pan0 = None
+
+    def _atlas_zoom_reset(self):
+        self.atlas_zoom   = 1.0
+        self.atlas_view_x = 0
+        self.atlas_view_y = 0
+        self.atlas_lbl_zoom.config(text="100%")
+        self._atlas_render_canvas()
 
     def atlas_save(self):
         if self.atlas_img is None or not self.atlas_outdir:
@@ -1337,12 +1691,30 @@ class SpriteCutterApp:
                 "Файл существует", f"Файл «{name}» уже существует. Перезаписать?"):
             return
         self.atlas_sheet.save(out)
+        self._atlas_last_out = out
+        self.atlas_btn_overwrite.config(state=tk.NORMAL)
         messagebox.showinfo("Готово!",
                             f"Атлас {self.atlas_sheet.width}×{self.atlas_sheet.height} px, "
                             f"{self.atlas_count} объектов\n"
                             f"Сохранён: {out}")
         self._atlas_name_manual = False
         self._atlas_suggest_name()
+
+    def atlas_overwrite(self):
+        if not self._atlas_last_out or self.atlas_img is None:
+            return
+        sheet, n, *_ = self._atlas_build()
+        if sheet is None:
+            messagebox.showwarning("Ошибка", "Объекты не найдены")
+            return
+        self.atlas_sheet = sheet
+        self.atlas_count = n
+        self.atlas_sheet.save(self._atlas_last_out)
+        self._atlas_update()
+        messagebox.showinfo("Готово!",
+                            f"Атлас {self.atlas_sheet.width}×{self.atlas_sheet.height} px, "
+                            f"{self.atlas_count} объектов\n"
+                            f"Перезаписан: {self._atlas_last_out}")
 
     # ═══════════════════════════════════════════════════════════════
     #  ВКЛАДКА 6 — ТАЙЛ-ТЕСТ
@@ -1357,6 +1729,9 @@ class SpriteCutterApp:
         self._btn(sb, "Открыть изображение", self.tc_open, GRN, h=2).pack(fill=tk.X, pady=3)
         self.tc_lbl_file = self._lbl(sb, "Файл не выбран", color=FG2)
         self.tc_lbl_file.pack(anchor=tk.W)
+        row_pc = tk.Frame(sb, bg=BG); row_pc.pack(fill=tk.X, pady=(3, 0))
+        self._btn(row_pc, "Вставить  Ctrl+V", self._paste_tc, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 1))
+        self._btn(row_pc, "Очистить",         self.tc_clear,  RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1, 0))
 
         self._sep(sb)
         self._lbl(sb, "2. Размер тайла превью (пикс)", bold=True).pack(anchor=tk.W, pady=(0, 6))
@@ -1446,6 +1821,7 @@ class SpriteCutterApp:
 
         self.tc_src_cv = tk.Canvas(lp, bg="#1e2124", highlightthickness=0, cursor="fleur")
         self.tc_src_cv.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
+        self._setup_dnd(self.tc_src_cv, self.tc_open)
 
         self.tc_prev_cv = tk.Canvas(rp, bg="#1e2124", highlightthickness=0)
         self.tc_prev_cv.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
@@ -1482,9 +1858,10 @@ class SpriteCutterApp:
         self.tc_src_ph  = None
         self.tc_prev_ph = None
 
-    def tc_open(self):
-        path = filedialog.askopenfilename(
-            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
+    def tc_open(self, path=None):
+        if path is None:
+            path = filedialog.askopenfilename(
+                filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.webp")])
         if not path:
             return
         self.tc_pil = Image.open(path).convert("RGBA")
@@ -1637,6 +2014,12 @@ class SpriteCutterApp:
 
     def _tc_render_source(self):
         if self.tc_pil is None:
+            cw = self.tc_src_cv.winfo_width() or 500
+            ch = self.tc_src_cv.winfo_height() or 500
+            self.tc_src_cv.delete("all")
+            self.tc_src_cv.create_text(cw // 2, ch // 2,
+                text="Откройте изображение или перетащите файл сюда",
+                fill=FG2, font=("Arial", 13), justify=tk.CENTER)
             return
         sz     = self.tc_size.get()
         iw, ih = self.tc_pil.size
@@ -1762,6 +2145,228 @@ class SpriteCutterApp:
     # ═══════════════════════════════════════════════════════════════
     #  ОБЩИЕ ДИАЛОГИ
     # ═══════════════════════════════════════════════════════════════
+
+    # ═══════════════════════════════════════════════════════════════
+    #  БУФЕР ОБМЕНА (Ctrl+V) И ОЧИСТКА
+    # ═══════════════════════════════════════════════════════════════
+
+    def _get_clipboard_path(self):
+        """Сохраняет изображение из буфера обмена во временный файл и возвращает путь."""
+        # 1. PIL ImageGrab (работает на Windows/macOS и Linux с xclip)
+        try:
+            from PIL import ImageGrab
+            data = ImageGrab.grabclipboard()
+            if isinstance(data, Image.Image):
+                fd, path = tempfile.mkstemp(suffix='.png', prefix='imgcuter_')
+                os.close(fd)
+                data.save(path)
+                return path
+            if isinstance(data, list):
+                for p in data:
+                    if isinstance(p, str) and os.path.isfile(p) and p.lower().endswith(self._IMG_EXTS):
+                        return p
+        except Exception:
+            pass
+        # 2. xclip (Linux/X11)
+        try:
+            import subprocess
+            for mime in ('image/png', 'image/jpeg', 'image/bmp'):
+                res = subprocess.run(
+                    ['xclip', '-selection', 'clipboard', '-t', mime, '-o'],
+                    capture_output=True, timeout=3)
+                if res.returncode == 0 and res.stdout:
+                    ext = '.jpg' if 'jpeg' in mime else f'.{mime.split("/")[1]}'
+                    img = Image.open(io.BytesIO(res.stdout))
+                    fd, path = tempfile.mkstemp(suffix=ext, prefix='imgcuter_')
+                    os.close(fd)
+                    img.save(path)
+                    return path
+        except Exception:
+            pass
+        # 3. wl-paste (Wayland)
+        try:
+            import subprocess
+            res = subprocess.run(['wl-paste', '--type', 'image/png'],
+                                 capture_output=True, timeout=3)
+            if res.returncode == 0 and res.stdout:
+                img = Image.open(io.BytesIO(res.stdout))
+                fd, path = tempfile.mkstemp(suffix='.png', prefix='imgcuter_')
+                os.close(fd)
+                img.save(path)
+                return path
+        except Exception:
+            pass
+        return None
+
+    def _global_paste(self, event=None):
+        tab_idx = self.nb.index(self.nb.select())
+        methods = [self._paste_auto, self._paste_tile, self._paste_shape,
+                   self._paste_mgr, self._paste_atlas, self._paste_tc]
+        if 0 <= tab_idx < len(methods):
+            methods[tab_idx]()
+
+    def _do_paste(self, loader, multi=False):
+        p = self._get_clipboard_path()
+        if not p:
+            messagebox.showinfo("Буфер", "В буфере нет изображения")
+            return
+        loader([p] if multi else p)
+
+    def _paste_auto(self):  self._do_paste(self._auto_dnd_load, multi=True)
+    def _paste_tile(self):  self._do_paste(self.tile_open)
+    def _paste_shape(self): self._do_paste(self.shape_open)
+    def _paste_mgr(self):   self._do_paste(self._mgr_dnd_load, multi=True)
+    def _paste_atlas(self): self._do_paste(self.atlas_open)
+    def _paste_tc(self):    self._do_paste(self.tc_open)
+
+    # ─── Очистка ────────────────────────────────────────────────────
+
+    def auto_clear(self):
+        # Состояние
+        self.auto_paths  = []
+        self.auto_idx    = 0
+        self.auto_orig   = None
+        self.auto_outdir = ""
+        self.auto_photo  = None
+        # Контролы → дефолт
+        self.auto_thresh.set(245)
+        self.auto_min.set(12)
+        self.auto_pad.set(2)
+        self.auto_sep.set(0)
+        # Метки и кнопки
+        self.auto_lbl_in.config(text="Файлы не выбраны")
+        self.auto_lbl_out.config(text="Папка не выбрана")
+        self.auto_nav.config(text="0 / 0")
+        self.auto_lbl_cnt.config(text="Найдено объектов: 0")
+        self.auto_btn_prev.config(state=tk.DISABLED)
+        self.auto_btn_next.config(state=tk.DISABLED)
+        # Превью: сначала сбросить картинку, потом поставить текст
+        self.auto_preview.config(image="")
+        self.auto_preview.config(text="Выберите изображение\nили перетащите файл(ы) сюда")
+
+    def tile_clear(self):
+        # Состояние
+        self.tile_img    = None
+        self.tile_photo  = None
+        self.tile_outdir = ""
+        # Контролы → дефолт
+        self.tile_mode.set("size")
+        self.tile_tw.set(32);  self.tile_th.set(32)
+        self.tile_cols.set(4); self.tile_rows.set(4)
+        self.tile_offset.set(0); self.tile_spacing.set(0)
+        self.tile_skip.set(True)
+        # Метки и кнопки
+        self.tile_lbl_file.config(text="Файл не выбран")
+        self.tile_lbl_out.config(text="Папка не выбрана")
+        self.tile_lbl_cnt.config(text="Тайлов: —")
+        self.tile_btn_save.config(state=tk.DISABLED)
+        # Превью
+        self.tile_canvas.delete("all")
+        self._tile_update()
+
+    def shape_clear_all(self):
+        # Состояние
+        self.shape_img    = None
+        self.shape_pil    = None
+        self.shape_outdir = ""
+        self.shape_sels.clear()
+        self.shape_cur  = []
+        self.shape_down = False
+        # Контролы → дефолт
+        self.shape_tool.set("rect")
+        self.shape_transp.set(True)
+        # Метки и кнопки
+        self.shape_lbl_file.config(text="Файл не выбран")
+        self.shape_lbl_out.config(text="Папка не выбрана")
+        self.shape_lb.delete(0, tk.END)
+        self.shape_btn_save.config(state=tk.DISABLED)
+        # Превью
+        self.shape_cv.delete("all")
+        self._shape_render()
+
+    def mgr_clear_all(self):
+        # Состояние
+        self.mgr_sprites.clear()
+        self.mgr_outdir = ""
+        # Контролы → дефолт
+        self.mgr_cols.set(8)
+        self.mgr_pad.set(4)
+        self.mgr_uniform.set(True)
+        self.mgr_minsize.set(1)
+        # Метки и кнопки
+        self.mgr_lbl_loaded.config(text="Загружено: 0")
+        self.mgr_lbl_sel.config(text="Выбрано: 0")
+        self.mgr_lbl_out.config(text="Папка не выбрана")
+        self.mgr_btn_sheet.config(state=tk.DISABLED)
+        # Превью (очищаем внутренний фрейм сетки)
+        for w in self.mgr_inner.winfo_children():
+            w.destroy()
+        self.mgr_canvas.delete("all")
+
+    def atlas_clear(self):
+        # Состояние
+        self.atlas_img      = None
+        self.atlas_src_path = None
+        self.atlas_outdir   = ""
+        self.atlas_sheet    = None
+        self._atlas_vis      = None
+        self._atlas_last_out = None
+        self.atlas_zoom      = 1.0
+        self.atlas_view_x   = 0
+        self.atlas_view_y   = 0
+        # Контролы → дефолт
+        self.atlas_thresh.set(245)
+        self.atlas_min.set(12)
+        self.atlas_sep.set(0)
+        self.atlas_cell.set(64)
+        self.atlas_scale_fit.set(True)
+        self.atlas_no_upscale.set(True)
+        self.atlas_align_w.set(True)
+        self.atlas_align_h.set(True)
+        self.atlas_cols.set(8)
+        self.atlas_name.set("atlas")
+        self._atlas_name_manual = False
+        # Метки и кнопки
+        self.atlas_lbl_file.config(text="Файл не выбран")
+        self.atlas_lbl_out.config(text="Папка не выбрана")
+        self.atlas_lbl_cnt.config(text="Найдено объектов: 0")
+        self.atlas_lbl_size.config(text="Размер атласа: — (авторасчёт)")
+        self.atlas_lbl_zoom.config(text="100%")
+        self.atlas_btn_save.config(state=tk.DISABLED)
+        self.atlas_btn_overwrite.config(state=tk.DISABLED)
+        # Превью
+        self.atlas_canvas.delete("all")
+        self._atlas_render_canvas()
+
+    def tc_clear(self):
+        # Состояние
+        self.tc_pil     = None
+        self.tc_outdir  = ""
+        self.tc_cx      = 0
+        self.tc_cy      = 0
+        self.tc_zoom    = 1.0
+        self.tc_view_x  = 0
+        self.tc_view_y  = 0
+        self.tc_drag0   = None
+        self.tc_pan0    = None
+        # Контролы → дефолт
+        self.tc_size.set(64)
+        self.tc_sel_w.set(64)
+        self.tc_sel_h.set(64)
+        self.tc_grid.set(3)
+        self.tc_snap.set(False)
+        self.tc_name.delete(0, tk.END)
+        self.tc_name.insert(0, "tile")
+        # Метки и кнопки
+        self.tc_lbl_file.config(text="Файл не выбран")
+        self.tc_lbl_out.config(text="Папка не выбрана")
+        self.tc_lbl_offset.config(text="X: 0   Y: 0")
+        self.tc_lbl_zoom.config(text="100%")
+        self.tc_btn_save.config(state=tk.DISABLED)
+        # Превью
+        self.tc_src_cv.delete("all")
+        self.tc_prev_cv.delete("all")
+        self._tc_render()
 
     def _gen_help_img(self, tab_id):
         W, H = 500, 220
@@ -2036,7 +2641,7 @@ class SpriteCutterApp:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     app = SpriteCutterApp(root)
     root.update()
     root.mainloop()
