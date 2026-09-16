@@ -1473,6 +1473,12 @@ class SpriteManufacturerApp:
         self.atlas_name_entry.pack(fill=tk.X, pady=(2, 0))
         self.atlas_name_entry.bind("<KeyRelease>", lambda _: setattr(self, "_atlas_name_manual", True))
 
+        ttk.Separator(s6, orient="horizontal").pack(fill=tk.X, pady=(10, 6))
+        self._lbl(s6, "Экспорт спрайтов по файлам:", color=FG2).pack(anchor=tk.W)
+        self.atlas_btn_export = self._btn(s6, "📁  Сохранить каждый спрайт отдельно",
+                                          self.atlas_export_files, BTN, state=tk.DISABLED)
+        self.atlas_btn_export.pack(fill=tk.X, pady=(4, 0))
+
         # Трей выбора спрайтов (внизу)
         tray_outer = tk.Frame(area, bg=BG2)
         tray_outer.pack(side=tk.BOTTOM, fill=tk.X)
@@ -1834,6 +1840,7 @@ class SpriteManufacturerApp:
                     fill=FG2, font=("Arial", 13), justify=tk.CENTER)
             self.atlas_lbl_size.config(text="Размер атласа: — (авторасчёт)")
             self.atlas_btn_save.config(state=tk.DISABLED)
+            self.atlas_btn_export.config(state=tk.DISABLED)
             return
 
         self._atlas_cell_w = cell_w
@@ -1854,7 +1861,9 @@ class SpriteManufacturerApp:
         cell_txt = f"{cell_w}×{cell_h}" if cell_w != cell_h else f"{cell_w}"
         self.atlas_lbl_size.config(
             text=f"{sheet.width}×{sheet.height} px  |  {cols}×{rows} ячеек  |  {cell_txt} px/яч")
-        self.atlas_btn_save.config(state=tk.NORMAL if self.atlas_outdir else tk.DISABLED)
+        has_out = bool(self.atlas_outdir)
+        self.atlas_btn_save.config(state=tk.NORMAL if has_out else tk.DISABLED)
+        self.atlas_btn_export.config(state=tk.NORMAL if has_out else tk.DISABLED)
         self._atlas_render_canvas()
 
     def _atlas_update(self, *_):
@@ -2049,6 +2058,32 @@ class SpriteManufacturerApp:
 
         # Переключаемся на вкладку атласа
         self.notebook.select(self.t_atlas)
+
+    def atlas_export_files(self):
+        """Сохраняет каждый спрайт (с учётом исключений и дедупа) отдельным PNG."""
+        if not self._atlas_raws or not self.atlas_outdir:
+            messagebox.showwarning("Ошибка", "Нет спрайтов или не выбрана папка сохранения")
+            return
+
+        # Берём те же raws что идут в атлас (исключения + дедуп)
+        raws = [p for i, p in enumerate(self._atlas_raws) if i not in self.atlas_excluded]
+        if self.atlas_dedup.get():
+            raws, _ = self._dedup_raws(raws, self.atlas_dedup_thresh.get())
+
+        if not raws:
+            messagebox.showwarning("Ошибка", "После фильтрации не осталось спрайтов")
+            return
+
+        base = self.atlas_name.get() or "sprite"
+        idx  = self._next_idx(self.atlas_outdir, base + "_")
+        for pil in raws:
+            out = os.path.join(self.atlas_outdir, f"{base}_{idx:04d}.png")
+            pil.save(out)
+            idx += 1
+
+        n = len(raws)
+        messagebox.showinfo("Готово!",
+                            f"Сохранено {n} спрайтов  →  {self.atlas_outdir}")
 
     def atlas_save(self):
         if self.atlas_img is None or not self.atlas_outdir:
@@ -2727,6 +2762,7 @@ class SpriteManufacturerApp:
         self.atlas_lbl_zoom.config(text="100%")
         self.atlas_btn_save.config(state=tk.DISABLED)
         self.atlas_btn_overwrite.config(state=tk.DISABLED)
+        self.atlas_btn_export.config(state=tk.DISABLED)
         # Превью
         self.atlas_tray.delete("all")
         self.atlas_canvas.delete("all")
