@@ -186,12 +186,12 @@ class SpriteManufacturerApp:
                  font=("Arial", 9, "bold")).pack(side=tk.LEFT, pady=5)
         body = tk.Frame(parent, bg=BG)
         if expanded:
-            body.pack(fill=tk.X, pady=(2, 4))
+            body.pack(fill=tk.X, pady=(2, 4), after=hdr)
         def _toggle(_=None):
             state[0] = not state[0]
             arrow.config(text="▼" if state[0] else "▶")
             if state[0]:
-                body.pack(fill=tk.X, pady=(2, 4))
+                body.pack(fill=tk.X, pady=(2, 4), after=hdr)
             else:
                 body.pack_forget()
         for w in (hdr, arrow) + tuple(hdr.winfo_children()):
