@@ -1070,7 +1070,8 @@ class SpriteManufacturerApp:
             self._load_src(path)
 
     def _load_src(self, path):
-        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        arr = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
         if img is None:
             messagebox.showerror("Ошибка", f"Не удалось открыть:\n{path}")
             return
@@ -1176,6 +1177,10 @@ class SpriteManufacturerApp:
     # ══════════════════════════════════════════════════════════════════
     #  CORE LOGIC UTILITIES
     # ══════════════════════════════════════════════════════════════════
+
+    def _imwrite(self, path, img):
+        _, buf = cv2.imencode(".png", img)
+        buf.tofile(path)
 
     def _cv2pil(self, img):
         if img is None:
@@ -1459,7 +1464,7 @@ class SpriteManufacturerApp:
         for c in contours:
             x, y, w, h = cv2.boundingRect(c)
             crop = rgba[y:y+h, x:x+w]
-            cv2.imwrite(os.path.join(self.outdir, f"sprite_{idx:04d}.png"), crop)
+            self._imwrite(os.path.join(self.outdir, f"sprite_{idx:04d}.png"), crop)
             idx += 1
         messagebox.showinfo("Готово!", f"Сохранено {len(contours)} спрайтов в:\n{self.outdir}")
 
@@ -1725,7 +1730,7 @@ class SpriteManufacturerApp:
         for (x, y, tw, th) in tiles:
             crop = rgba[y:y+th, x:x+tw]
             if skip and self._tile_is_empty(crop): continue
-            cv2.imwrite(os.path.join(self.outdir, f"tile_{idx:04d}.png"), crop)
+            self._imwrite(os.path.join(self.outdir, f"tile_{idx:04d}.png"), crop)
             idx += 1; saved += 1
         messagebox.showinfo("Готово!", f"Сохранено {saved} тайлов в:\n{self.outdir}")
 
@@ -2159,7 +2164,8 @@ class SpriteManufacturerApp:
         img = None
         src_path = data.get("source_path", "")
         if src_path and os.path.exists(src_path):
-            img = cv2.imread(src_path, cv2.IMREAD_UNCHANGED)
+            arr = np.fromfile(src_path, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
         if img is None and "source_data" in data:
             raw = base64.b64decode(data["source_data"])
             arr = np.frombuffer(raw, np.uint8)
