@@ -1,5 +1,7 @@
 # Sprite Manufacturer
 
+[![Download for Windows](https://img.shields.io/github/v/release/Shtilluz/ImageCuter?label=Download%20for%20Windows&style=for-the-badge&logo=windows&color=0078d4)](https://github.com/Shtilluz/ImageCuter/releases/latest/download/gui_cutter.exe)
+
 [Русский](#russian) | [English](#english)
 
 ---
