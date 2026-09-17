@@ -67,7 +67,8 @@ class SpriteManufacturerApp:
         self._cv_img_oy  = 0
 
         # Atlas state
-        self._atlas_raws    = []
+        self._atlas_raws      = []
+        self._atlas_raw_boxes = []
         self._atlas_vis     = None
         self._atlas_cell_w  = 64
         self._atlas_cell_h  = 64
@@ -1758,13 +1759,24 @@ class SpriteManufacturerApp:
         cell0 = max(4, self._atlas_cell.get() if hasattr(self, "_atlas_cell") else 64)
         boxes = sorted([cv2.boundingRect(c) for c in contours],
                        key=lambda b: (b[1] // max(1, cell0), b[0]))
+
+        # Remap excluded by box identity so resorting on cell-size change
+        # doesn't shift crosses to wrong sprites.
+        old_boxes = getattr(self, "_atlas_raw_boxes", [])
+        excluded_boxes = {old_boxes[i] for i in self.excluded if i < len(old_boxes)}
+
         raws = []
         for (x, y, w, h) in boxes:
             pil = self._cv2pil(rgba[y:y+h, x:x+w]).convert("RGBA")
             pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
             raws.append(pil)
-        if len(raws) != len(self._atlas_raws):
+
+        if excluded_boxes:
+            self.excluded = {i for i, b in enumerate(boxes) if b in excluded_boxes}
+        elif len(raws) != len(self._atlas_raws):
             self.excluded = set()
+
+        self._atlas_raw_boxes = boxes
         self._atlas_raws = raws
         return raws
 
