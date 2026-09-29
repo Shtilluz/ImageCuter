@@ -45,6 +45,13 @@
 - Настраиваемый размер тайла и зоны выбора
 - Привязка к сетке
 
+#### 🔲 Пакетный ресайз
+- Выбор папки с изображениями и опциональный рекурсивный обход подпапок
+- Целевые размеры: 32 / 64 / 128 / 256 / 512 px
+- Три режима выравнивания: **оба** (квадрат), **по ширине** (высота масштабируется), **по высоте** (ширина масштабируется)
+- Сохраняет прозрачность — все файлы конвертируются в PNG с каналом Alpha
+- Воспроизводит структуру подпапок в папке вывода; либо сохраняет файлы рядом с оригиналами
+
 ### Общие возможности
 - **Drag & Drop** — перетащите изображение прямо в окно
 - **Ctrl+V** — вставка из буфера обмена
@@ -119,6 +126,13 @@ Color scheme: dark charcoal + amber accent.
 - Check tile seamlessness with an NxN grid preview
 - Configurable tile and selection size
 - Grid snapping
+
+#### 🔲 Batch Resizer
+- Select a folder with images and optionally scan subfolders recursively
+- Target sizes: 32 / 64 / 128 / 256 / 512 px
+- Three axis modes: **both** (square), **width** (height scales proportionally), **height** (width scales proportionally)
+- Preserves transparency — all output files are saved as PNG with alpha channel
+- Mirrors the subfolder structure in the output directory; or saves files next to the originals
 
 ### General Features
 - **Drag & Drop** — drop an image directly into the window

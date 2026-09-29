@@ -35,6 +35,7 @@ TOOLS = [
     ("grid",     "📐", "Сетка"),
     ("atlas",    "📦", "Атлас"),
     ("tiletest", "🎮", "Тайл-тест"),
+    ("resize",   "🔲", "Ресайз"),
 ]
 
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
@@ -251,6 +252,7 @@ class SpriteManufacturerApp:
         self._canvas = tk.Canvas(cv_frame, bg="#1e2124", highlightthickness=0)
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._bind_canvas_common()
+        self._setup_dnd(self._canvas, self._load_src)
 
         # Right props panel (310px, scrollable)
         self._props_outer, self._props = self._scrollable_frame(main)
@@ -290,7 +292,7 @@ class SpriteManufacturerApp:
         status.pack(fill=tk.X, side=tk.BOTTOM)
 
         # Pre-build all tool panels once; _rebuild_props just shows/hides them
-        for _tn in ("auto", "shape", "grid", "atlas", "tiletest"):
+        for _tn in ("auto", "shape", "grid", "atlas", "tiletest", "resize"):
             _fr = tk.Frame(self._props, bg=BG)
             getattr(self, f"_build_props_{_tn}")(_fr)
             self._panels[_tn] = _fr
@@ -736,6 +738,30 @@ class SpriteManufacturerApp:
         self._sep(p)
         self._btn(p, "▶  Запустить детекцию", self._auto_run, ACC, h=2).pack(fill=tk.X, pady=3)
         self._btn(p, "➕  Добавить в трей", self._auto_add_to_tray, GRN, h=2).pack(fill=tk.X, pady=3)
+        self._sep(p)
+        self._lbl(p, "Масштаб при сохранении:", bold=True).pack(anchor=tk.W, pady=(0,4))
+        if not hasattr(self, "_auto_scale_mode"):
+            self._auto_scale_mode = tk.StringVar(value="none")
+            self._auto_scale_w = tk.IntVar(value=64)
+            self._auto_scale_h = tk.IntVar(value=64)
+        for txt, val in [("Не масштабировать", "none"),
+                         ("По ширине", "w"),
+                         ("По высоте", "h"),
+                         ("По ширине и высоте", "both")]:
+            tk.Radiobutton(p, text=txt, variable=self._auto_scale_mode, value=val,
+                           bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                           command=self._auto_scale_update).pack(anchor=tk.W)
+        wf = tk.Frame(p, bg=BG); wf.pack(fill=tk.X, pady=(4,0))
+        self._lbl(wf, "Ширина:").pack(side=tk.LEFT)
+        self._auto_scale_w_sb = self._spinbox(wf, self._auto_scale_w, 1, 4096, w=6)
+        self._auto_scale_w_sb.pack(side=tk.LEFT, padx=4)
+        self._lbl(wf, "пикс").pack(side=tk.LEFT)
+        hf = tk.Frame(p, bg=BG); hf.pack(fill=tk.X, pady=(2,0))
+        self._lbl(hf, "Высота:").pack(side=tk.LEFT)
+        self._auto_scale_h_sb = self._spinbox(hf, self._auto_scale_h, 1, 4096, w=6)
+        self._auto_scale_h_sb.pack(side=tk.LEFT, padx=4)
+        self._lbl(hf, "пикс").pack(side=tk.LEFT)
+        self._auto_scale_update()
         self._sep(p)
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
         self._outdir_lbls["auto"] = self._lbl(p, "Папка не выбрана", color=FG2)
@@ -1401,6 +1427,38 @@ class SpriteManufacturerApp:
     #  AUTO TOOL
     # ══════════════════════════════════════════════════════════════════
 
+    def _auto_scale_update(self):
+        if not hasattr(self, "_auto_scale_mode"):
+            return
+        mode = self._auto_scale_mode.get()
+        w_state = tk.NORMAL if mode in ("w", "both") else tk.DISABLED
+        h_state = tk.NORMAL if mode in ("h", "both") else tk.DISABLED
+        if hasattr(self, "_auto_scale_w_sb"):
+            self._auto_scale_w_sb.config(state=w_state)
+        if hasattr(self, "_auto_scale_h_sb"):
+            self._auto_scale_h_sb.config(state=h_state)
+
+    def _auto_scale_apply(self, pil_img):
+        if not hasattr(self, "_auto_scale_mode"):
+            return pil_img
+        mode = self._auto_scale_mode.get()
+        if mode == "none":
+            return pil_img
+        ow, oh = pil_img.size
+        if ow == 0 or oh == 0:
+            return pil_img
+        sw = self._auto_scale_w.get()
+        sh = self._auto_scale_h.get()
+        if mode == "w":
+            nw = sw
+            nh = max(1, round(oh * sw / ow))
+        elif mode == "h":
+            nh = sh
+            nw = max(1, round(ow * sh / oh))
+        else:
+            nw, nh = sw, sh
+        return pil_img.resize((nw, nh), Image.LANCZOS)
+
     def _auto_run(self):
         if self.src_img is None:
             self._auto_contours_cache = []
@@ -1437,6 +1495,7 @@ class SpriteManufacturerApp:
             x, y, w, h = cv2.boundingRect(c)
             pil = self._cv2pil(rgba[y:y+h, x:x+w]).convert("RGBA")
             pil = self._trim_crop(pil, tv, dark_bg, has_alpha)
+            pil = self._auto_scale_apply(pil)
             raws.append(pil)
         self._tray_add(raws)
         messagebox.showinfo("Трей", f"Добавлено {len(raws)} спрайтов в трей")
@@ -1465,6 +1524,10 @@ class SpriteManufacturerApp:
         for c in contours:
             x, y, w, h = cv2.boundingRect(c)
             crop = rgba[y:y+h, x:x+w]
+            pil_crop = self._cv2pil(crop)
+            if pil_crop is not None:
+                pil_crop = self._auto_scale_apply(pil_crop.convert("RGBA"))
+                crop = cv2.cvtColor(np.array(pil_crop), cv2.COLOR_RGBA2BGRA)
             self._imwrite(os.path.join(self.outdir, f"sprite_{idx:04d}.png"), crop)
             idx += 1
         messagebox.showinfo("Готово!", f"Сохранено {len(contours)} спрайтов в:\n{self.outdir}")
@@ -2208,6 +2271,146 @@ class SpriteManufacturerApp:
             self.src_path = src_path
             self._update_src_lbl(os.path.basename(src_path))
             self._atlas_update()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  RESIZE PANEL
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_props_resize(self, parent=None):
+        p = parent if parent is not None else self._props
+        self._lbl(p, "Пакетный ресайз", bold=True, size=11).pack(anchor=tk.W, pady=(0, 8))
+
+        self._btn(p, "📂 Выбрать папку", self._resize_pick_folder, GRN, h=2).pack(fill=tk.X, pady=3)
+
+        if not hasattr(self, "_resize_folder_var"):
+            self._resize_folder_var = tk.StringVar(value="")
+        self._resize_folder_lbl = self._lbl(p, "Папка не выбрана", color=FG2)
+        self._resize_folder_lbl.pack(anchor=tk.W, pady=(0, 4))
+
+        if not hasattr(self, "_resize_recursive"):
+            self._resize_recursive = tk.BooleanVar(value=False)
+        tk.Checkbutton(p, text="Сканировать подпапки", variable=self._resize_recursive,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       font=("Arial", 9)).pack(anchor=tk.W, pady=(0, 6))
+
+        self._sep(p)
+        self._lbl(p, "Целевой размер (px):", bold=True).pack(anchor=tk.W, pady=(0, 5))
+
+        if not hasattr(self, "_resize_size_var"):
+            self._resize_size_var = tk.IntVar(value=64)
+        szf = tk.Frame(p, bg=BG); szf.pack(fill=tk.X)
+        for sz in (32, 64, 128, 256, 512):
+            tk.Radiobutton(szf, text=str(sz), variable=self._resize_size_var, value=sz,
+                           bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                           font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=2)
+
+        self._lbl(p, "Выравнивать по:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
+        if not hasattr(self, "_resize_axis"):
+            self._resize_axis = tk.StringVar(value="both")
+        axf = tk.Frame(p, bg=BG); axf.pack(fill=tk.X)
+        for val, txt in (("both", "Оба (квадрат)"), ("width", "Ширина"), ("height", "Высота")):
+            tk.Radiobutton(axf, text=txt, variable=self._resize_axis, value=val,
+                           bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                           font=("Arial", 9)).pack(anchor=tk.W)
+
+        self._sep(p)
+        self._lbl(p, "Папка вывода:", bold=True).pack(anchor=tk.W, pady=(0, 3))
+        self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
+        self._outdir_lbls["resize"] = self._lbl(p, "Папка не выбрана", color=FG2)
+        self._outdir_lbls["resize"].pack(anchor=tk.W, pady=(3, 0))
+
+        if not hasattr(self, "_resize_same_folder"):
+            self._resize_same_folder = tk.BooleanVar(value=False)
+        tk.Checkbutton(p, text="Сохранять рядом с оригиналом", variable=self._resize_same_folder,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       font=("Arial", 9)).pack(anchor=tk.W, pady=(4, 0))
+
+        self._sep(p)
+        self._resize_status_lbl = self._lbl(p, "", color=GOLD, bold=True)
+        self._resize_status_lbl.pack(anchor=tk.W, pady=(0, 4))
+
+        self._btn(p, "ПРИМЕНИТЬ РЕСАЙЗ", self._resize_run, ACC, h=2).pack(fill=tk.X, pady=(4, 3))
+
+    def _resize_pick_folder(self):
+        folder = filedialog.askdirectory(title="Выберите папку с изображениями")
+        if not folder:
+            return
+        self._resize_folder_var.set(folder)
+        short = folder if len(folder) <= 40 else "…" + folder[-37:]
+        self._resize_folder_lbl.config(text=short)
+        self._add_recent(folder)
+
+    def _resize_run(self):
+        folder = self._resize_folder_var.get()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Ошибка", "Папка не выбрана или не существует.")
+            return
+
+        size = self._resize_size_var.get()
+        axis = self._resize_axis.get()
+        recursive = self._resize_recursive.get()
+        same = self._resize_same_folder.get()
+        outdir = self.outdir if not same else None
+
+        if not same and not outdir:
+            messagebox.showerror("Ошибка", "Выберите папку вывода или включите «Сохранять рядом с оригиналом».")
+            return
+
+        # Collect images
+        files = []
+        if recursive:
+            for root_dir, _, fnames in os.walk(folder):
+                for fn in fnames:
+                    if os.path.splitext(fn)[1].lower() in _IMG_EXTS:
+                        files.append(os.path.join(root_dir, fn))
+        else:
+            for fn in os.listdir(folder):
+                if os.path.splitext(fn)[1].lower() in _IMG_EXTS:
+                    files.append(os.path.join(folder, fn))
+
+        if not files:
+            messagebox.showinfo("Пусто", "В выбранной папке нет изображений.")
+            return
+
+        ok = 0
+        err = 0
+        for fpath in files:
+            try:
+                img = Image.open(fpath).convert("RGBA")
+                w, h = img.size
+                if axis == "both":
+                    new_w, new_h = size, size
+                elif axis == "width":
+                    new_w = size
+                    new_h = round(h * size / w) if w else size
+                else:  # height
+                    new_h = size
+                    new_w = round(w * size / h) if h else size
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+
+                if same:
+                    dst = fpath
+                else:
+                    rel = os.path.relpath(fpath, folder)
+                    dst = os.path.join(outdir, rel)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+                # Force PNG to preserve transparency
+                base, ext = os.path.splitext(dst)
+                if ext.lower() not in (".png",):
+                    dst = base + ".png"
+                img.save(dst, "PNG")
+                ok += 1
+            except Exception as e:
+                print(f"resize error {fpath}: {e}")
+                err += 1
+
+        msg = f"Готово: {ok} файлов"
+        if err:
+            msg += f", ошибок: {err}"
+        self._resize_status_lbl.config(text=msg)
+        self._status_var.set(msg)
+        messagebox.showinfo("Ресайз завершён", msg)
 
     # ══════════════════════════════════════════════════════════════════
     #  MISC
