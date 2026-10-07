@@ -12,7 +12,7 @@ a = Analysis(
     ['gui_cutter.py'],
     pathex=[],
     binaries=dnd_binaries,
-    datas=dnd_datas,
+    datas=dnd_datas + [('resource', 'resource')],
     hiddenimports=dnd_hiddenimports,
     hookspath=[],
     hooksconfig={},

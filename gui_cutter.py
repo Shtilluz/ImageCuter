@@ -6,28 +6,37 @@ Sprite Manufacturer v3 — Unified Workspace
 import cv2
 import numpy as np
 import os
+import sys
 import base64
 import io
 import json
 import subprocess
 import tempfile
+from urllib.parse import unquote, urlparse
+from functools import wraps
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk, ImageDraw
+from ui_widgets import SoftButton, SoftCheck, SoftRadio, SoftSlider
 from tkinterdnd2 import TkinterDnD, DND_FILES
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+CONFIG_FILE = os.path.join(os.path.dirname(sys.executable if getattr(sys, "frozen", False)
+                                         else os.path.abspath(__file__)), "config.json")
 
-BG      = "#1a1a1a"
-BG2     = "#242424"
-BTN     = "#333333"
-FG      = "#e8e8e8"
-FG2     = "#888888"
-ACC     = "#e8a030"
-GRN     = "#3dba6a"
-RED     = "#e05050"
-GOLD    = "#e8a030"
-TOOL_BG = "#2a2a2a"
+BG      = "#fbfaf7"
+BG2     = "#f1f0eb"
+BTN     = "#eeede7"
+FG      = "#303b34"
+FG2     = "#737c70"
+ACC     = "#5c7057"
+GRN     = "#e1eade"
+RED     = "#f3e4df"
+GOLD    = "#5c7057"
+TOOL_BG = "#f5f4ef"
+INPUT   = "#ffffff"
+WHITE   = "#ffffff"
+BORDER  = "#deded6"
+CANVAS  = "#e9e7df"
 
 TOOLS = [
     ("auto",     "🔍", "Авто"),
@@ -41,6 +50,16 @@ TOOLS = [
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
 
+def file_operation(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except (OSError, ValueError, cv2.error) as error:
+            messagebox.showerror("Ошибка файла", f"Операция не завершена:\n{error}")
+    return guarded
+
+
 class SpriteManufacturerApp:
     def __init__(self, root):
         self.root = root
@@ -48,6 +67,24 @@ class SpriteManufacturerApp:
         self.root.geometry("1300x860")
         self.root.minsize(1000, 700)
         self.root.configure(bg=BG)
+        self.root.option_add("*Font", "{Segoe UI} 10")
+        self.root.option_add("*disabledForeground", "#83877d")
+        style = ttk.Style(root)
+        style.theme_use("clam")
+        style.configure("TScrollbar", background=BTN, troughcolor=BG2,
+                        bordercolor=BG2, arrowcolor=FG2)
+        style.configure("TSeparator", background=BTN)
+        style.map("TScrollbar", background=[("active", BORDER), ("pressed", BORDER)])
+        style.configure("TScrollbar", arrowsize=10, borderwidth=0, relief="flat")
+        style.layout("Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+            ("Vertical.Scrollbar.thumb", {"expand": True, "sticky": "nswe"})]})])
+        style.layout("Horizontal.TScrollbar", [("Horizontal.Scrollbar.trough", {"sticky": "ew", "children": [
+            ("Horizontal.Scrollbar.thumb", {"expand": True, "sticky": "nswe"})]})])
+        style.configure("Soft.TSpinbox", fieldbackground=INPUT, foreground=FG,
+                        background=BG, bordercolor=BORDER, lightcolor=INPUT, darkcolor=INPUT,
+                        arrowcolor=FG2, padding=4, borderwidth=1, relief="flat")
+        style.map("Soft.TSpinbox", bordercolor=[("focus", "#a7b7a0")],
+                  fieldbackground=[("disabled", BG2)], foreground=[("disabled", "#969d91")])
         self._set_icon()
         self.recent_dirs = self._load_config()
 
@@ -57,6 +94,7 @@ class SpriteManufacturerApp:
         self.sprites   = []     # list of PIL RGBA
         self.excluded  = set()  # excluded tray indices
         self.outdir    = ""
+        self._outdir_auto = True
         self.tool      = "auto"
 
         # Canvas zoom/pan
@@ -85,7 +123,7 @@ class SpriteManufacturerApp:
         self._sh_cur   = []
         self._sh_down  = False
         self._sh_start = None
-        self._sh_colors = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#1abc9c"]
+        self._sh_colors = ["#a1493d", "#4e6d43", "#91661e", "#765780", "#4c7470", "#594f45"]
 
         # Tiletest state
         self._tc_cx    = 0
@@ -113,6 +151,12 @@ class SpriteManufacturerApp:
         self.root.bind("<Control-v>", self._global_paste)
         self.root.bind("<Control-V>", self._global_paste)
         self.root.bind("<Escape>",    lambda _: self._sh_reset())
+        self.root.bind("<Control-o>", lambda _: self._menu_open_src())
+        self.root.bind("<Control-s>", lambda _: self.project_save())
+        self.root.bind("<Control-Shift-O>", lambda _: self.project_load())
+        self.root.bind("<Control-0>", lambda _: self._cv_zoom_reset())
+        self.root.bind("<Control-1>", lambda _: self._cv_actual_size())
+        self.root.bind_all("<MouseWheel>", self._route_panel_wheel, add="+")
 
     # ══════════════════════════════════════════════════════════════════
     #  ICON / CONFIG
@@ -157,34 +201,48 @@ class SpriteManufacturerApp:
 
     def _lbl(self, parent, text, bold=False, color=FG, size=10):
         return tk.Label(parent, text=text, fg=color, bg=BG,
-                        font=("Arial", size, "bold" if bold else "normal"))
+                        font=("Segoe UI", size, "bold" if bold else "normal"),
+                        wraplength=290, justify=tk.LEFT)
 
     def _btn(self, parent, text, cmd, color=BTN, h=1, state=tk.NORMAL, font_size=10):
-        return tk.Button(parent, text=text, command=cmd, bg=color, fg=FG,
-                         font=("Arial", font_size, "bold"), height=h, state=state,
-                         relief=tk.FLAT, activebackground=color, activeforeground=FG,
-                         cursor="hand2")
+        foreground = WHITE if color == ACC else "#94594e" if color == RED else FG
+        return SoftButton(parent, text=text, command=cmd, bg=color, fg=foreground,
+                          font=("Segoe UI", font_size), height=42 if h > 1 else 34, state=state)
 
     def _spinbox(self, parent, var, lo, hi, w=6, cmd=None):
-        kw = dict(from_=lo, to=hi, textvariable=var, width=w, bg=BTN, fg=FG,
-                  relief=tk.FLAT, highlightthickness=0, insertbackground=FG,
-                  buttonbackground=BTN)
-        if cmd:
-            kw["command"] = cmd
-        return tk.Spinbox(parent, **kw)
+        editor = tk.StringVar(value=str(var.get()))
+        kw = dict(from_=lo, to=hi, textvariable=editor, width=w,
+                  style="Soft.TSpinbox", font=("Segoe UI", 10))
+        def validate(value):
+            return value == "" or (value.isdecimal() and len(value) <= 6)
+        kw.update(validate="key", validatecommand=(self.root.register(validate), "%P"))
+        sb = ttk.Spinbox(parent, **kw)
+        def commit(_=None):
+            try:
+                value = int(sb.get())
+            except ValueError:
+                value = lo
+            var.set(max(lo, min(hi, value)))
+            if cmd:
+                cmd()
+        sb.config(command=commit)
+        var.trace_add("write", lambda *_: editor.set(str(var.get())))
+        sb.bind("<FocusOut>", commit)
+        sb.bind("<Return>", commit)
+        return sb
 
     def _sep(self, parent):
-        ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=9)
+        tk.Frame(parent, bg=BG, height=12).pack(fill=tk.X, pady=3)
 
     def _section(self, parent, title, expanded=True):
-        hdr = tk.Frame(parent, bg=BTN, cursor="hand2")
-        hdr.pack(fill=tk.X, pady=(5, 0))
+        hdr = tk.Frame(parent, bg=BG, cursor="hand2")
+        hdr.pack(fill=tk.X, pady=(12, 0))
         state = [expanded]
         arrow = tk.Label(hdr, text="▼" if expanded else "▶",
-                         bg=BTN, fg=GOLD, font=("Arial", 9, "bold"), width=2)
+                         bg=BG, fg=GOLD, font=("Segoe UI", 9, "bold"), width=2)
         arrow.pack(side=tk.LEFT, padx=(4, 0))
-        tk.Label(hdr, text=title, bg=BTN, fg=FG,
-                 font=("Arial", 9, "bold")).pack(side=tk.LEFT, pady=5)
+        tk.Label(hdr, text=title, bg=BG, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, pady=7)
         body = tk.Frame(parent, bg=BG)
         if expanded:
             body.pack(fill=tk.X, pady=(2, 4), after=hdr)
@@ -210,6 +268,7 @@ class SpriteManufacturerApp:
         sc = tk.Canvas(outer, bg=BG, highlightthickness=0, yscrollcommand=vsb.set)
         sc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.config(command=sc.yview)
+        self._props_scroll = sc
         inner = tk.Frame(sc, bg=BG, padx=10, pady=8)
         wid = sc.create_window((0, 0), window=inner, anchor=tk.NW)
         sc.bind("<Configure>", lambda e: sc.itemconfig(wid, width=e.width))
@@ -219,10 +278,41 @@ class SpriteManufacturerApp:
                 sc.yview_scroll(-1, "units")
             else:
                 sc.yview_scroll(1, "units")
-        sc.bind("<MouseWheel>", _scroll)
         sc.bind("<Button-4>", _scroll)
         sc.bind("<Button-5>", _scroll)
         return outer, inner
+
+    def _route_panel_wheel(self, event):
+        widget = event.widget
+        while widget is not None:
+            if widget == self._props_outer:
+                self._props_scroll.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return "break"
+            widget = getattr(widget, "master", None)
+
+    def _source_controls(self, parent, name):
+        row = tk.Frame(parent, bg=BG)
+        row.pack(fill=tk.X, pady=(0, 4))
+        self._src_lbls[name] = self._lbl(row, "Файл не выбран", color=FG2, size=9)
+        self._src_lbls[name].config(wraplength=230, anchor=tk.W)
+        self._src_lbls[name].pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._btn(row, "×", self._clear_src, font_size=10).pack(side=tk.RIGHT)
+
+    def _cv_actual_size(self):
+        image = (None if self.tool == "resize" else
+                 self._atlas_vis if self.tool == "atlas" else self._cv2pil(self.src_img))
+        if image is None:
+            return
+        width = self._canvas.winfo_width()
+        if self.tool == "tiletest":
+            width = width // 2 - 1
+        fit = min(width / image.width, self._canvas.winfo_height() / image.height)
+        self._cv_zoom_reset()
+        if self.tool == "tiletest":
+            self._tc_zoom = 1 / fit
+        else:
+            self._cv_zoom = 1 / fit
+        self._cv_draw()
 
     # ══════════════════════════════════════════════════════════════════
     #  BUILD MAIN UI
@@ -231,50 +321,78 @@ class SpriteManufacturerApp:
     def _build_ui(self):
         # Menu bar
         menubar = tk.Menu(self.root, bg=BG2, fg=FG, activebackground=ACC,
-                          activeforeground=FG, relief=tk.FLAT, borderwidth=0)
+                          activeforeground=WHITE, relief=tk.FLAT, borderwidth=0)
         self.root.config(menu=menubar)
         self._build_menu(menubar)
+
+        top = tk.Frame(self.root, bg=BG2, padx=16, pady=14)
+        top.pack(fill=tk.X)
+        tk.Label(top, text="Sprite Manufacturer", bg=BG2, fg=FG,
+                 font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT, padx=(0, 22))
+        self._btn(top, "Открыть…", self._menu_open_src, ACC).pack(side=tk.LEFT, padx=3)
+        self._btn(top, "Вставить", self._global_paste).pack(side=tk.LEFT, padx=3)
+        self._btn(top, "Сохранить проект", self.project_save).pack(side=tk.LEFT, padx=3)
+        self._btn(top, "Папка вывода…", self._menu_choose_outdir).pack(side=tk.RIGHT, padx=3)
+        self._export_current_btn = self._btn(top, "Экспорт…", self._save_current, ACC)
+        self._export_current_btn.pack(side=tk.RIGHT, padx=3)
+
+        # Reserve the result strip before the expanding workspace.
+        bottom = tk.Frame(self.root, bg=BG2)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
 
         # Main container (toolbar | canvas | props)
         main = tk.Frame(self.root, bg=BG)
         main.pack(fill=tk.BOTH, expand=True)
 
         # Left toolbar (64px)
-        self._toolbar = tk.Frame(main, width=64, bg=TOOL_BG)
-        self._toolbar.pack(side=tk.LEFT, fill=tk.Y)
+        self._toolbar = tk.Frame(main, width=150, bg=TOOL_BG)
+        self._toolbar.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 4), pady=8)
         self._toolbar.pack_propagate(False)
         self._tool_btns = {}
         self._build_toolbar()
 
         # Center canvas
         cv_frame = tk.Frame(main, bg=BG2)
-        cv_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._canvas = tk.Canvas(cv_frame, bg="#1e2124", highlightthickness=0)
+        cv_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=8)
+        viewbar = tk.Frame(cv_frame, bg=BG2, padx=10, pady=5)
+        viewbar.pack(fill=tk.X)
+        self._view_title = tk.Label(viewbar, text="Исходное изображение", bg=BG2,
+                                    fg=FG, font=("Segoe UI", 10, "bold"))
+        self._view_title.pack(side=tk.LEFT)
+        self._zoom_var = tk.StringVar(value="—")
+        tk.Label(viewbar, textvariable=self._zoom_var, bg=BG2, fg=FG2,
+                 font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=8)
+        self._btn(viewbar, "1:1", self._cv_actual_size, font_size=9).pack(side=tk.RIGHT, padx=3)
+        self._btn(viewbar, "Вписать", self._cv_zoom_reset, font_size=9).pack(side=tk.RIGHT, padx=3)
+        self._canvas = tk.Canvas(cv_frame, bg=CANVAS, highlightthickness=0)
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._bind_canvas_common()
-        self._setup_dnd(self._canvas, self._load_src)
+        self._setup_dnd(self._canvas, self._handle_drop_paths, multi=True)
+        self._setup_dnd(self.root, self._handle_drop_paths, multi=True)
+        self._canvas.bind("<Double-Button-1>", lambda _: self._menu_open_src()
+                          if self.src_img is None else None)
+        self._tool_hint = tk.StringVar()
+        tk.Label(cv_frame, textvariable=self._tool_hint, bg=BG2, fg=FG2,
+                 font=("Segoe UI", 9), anchor=tk.W, padx=12, pady=7,
+                 wraplength=620, justify=tk.LEFT).pack(fill=tk.X)
 
         # Right props panel (310px, scrollable)
         self._props_outer, self._props = self._scrollable_frame(main)
 
         # Bottom area: tray + statusbar
-        bottom = tk.Frame(self.root, bg=BG2)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X)
 
         # Sprite tray
         tray_frame = tk.Frame(bottom, bg=BG2)
         tray_frame.pack(fill=tk.X)
         tray_header = tk.Frame(tray_frame, bg=BG2)
         tray_header.pack(fill=tk.X)
-        self._tray_count_lbl = tk.Label(tray_header, text="Трей: 0 спрайтов",
-                                        bg=BG2, fg=FG2, font=("Arial", 8))
-        self._tray_count_lbl.pack(side=tk.LEFT, padx=6, pady=2)
-        tk.Button(tray_header, text="Очистить трей", command=self._tray_clear,
-                  bg=RED, fg=FG, font=("Arial", 8, "bold"), relief=tk.FLAT,
-                  cursor="hand2", pady=1).pack(side=tk.RIGHT, padx=4)
-        tk.Button(tray_header, text="Сохранить все →", command=self._tray_save_all,
-                  bg=GRN, fg=FG, font=("Arial", 8, "bold"), relief=tk.FLAT,
-                  cursor="hand2", pady=1).pack(side=tk.RIGHT, padx=2)
+        self._tray_count_lbl = tk.Label(tray_header, text="Спрайты: 0",
+                                        bg=BG2, fg=FG, font=("Segoe UI", 10, "bold"))
+        self._tray_count_lbl.pack(side=tk.LEFT, padx=12, pady=8)
+        self._tray_clear_btn = self._btn(tray_header, "Очистить", self._tray_clear, font_size=9)
+        self._tray_clear_btn.pack(side=tk.RIGHT, padx=6)
+        self._tray_save_btn = self._btn(tray_header, "Экспорт спрайтов…", self._tray_save_all, ACC, font_size=9)
+        self._tray_save_btn.pack(side=tk.RIGHT, padx=2)
         tray_row = tk.Frame(tray_frame, bg=BG2)
         tray_row.pack(fill=tk.X)
         self._tray_canvas = tk.Canvas(tray_row, bg=BG2, height=80, highlightthickness=0)
@@ -287,9 +405,9 @@ class SpriteManufacturerApp:
         self._tray_canvas.bind("<ButtonRelease-1>", self._tray_release)
 
         # Status bar
-        self._status_var = tk.StringVar(value="Готов")
+        self._status_var = tk.StringVar(value="Готов к работе • Ctrl+O — открыть • Ctrl+V — вставить")
         status = tk.Label(bottom, textvariable=self._status_var,
-                          bg="#17191c", fg=FG2, font=("Arial", 8),
+                          bg=BG2, fg=FG2, font=("Segoe UI", 8),
                           anchor=tk.W, padx=8)
         status.pack(fill=tk.X, side=tk.BOTTOM)
 
@@ -301,11 +419,12 @@ class SpriteManufacturerApp:
 
         # Initial tool
         self._tool_set("auto")
+        self._tray_refresh()
 
     def _build_menu(self, menubar):
         # Файл
         fm = tk.Menu(menubar, tearoff=0, bg=BG2, fg=FG,
-                     activebackground=ACC, activeforeground=FG)
+                     activebackground=ACC, activeforeground=WHITE)
         menubar.add_cascade(label="Файл", menu=fm)
         fm.add_command(label="Открыть изображение",   command=self._menu_open_src)
         fm.add_command(label="Вставить из буфера (Ctrl+V)", command=self._global_paste)
@@ -321,32 +440,41 @@ class SpriteManufacturerApp:
 
         # Правка
         em = tk.Menu(menubar, tearoff=0, bg=BG2, fg=FG,
-                     activebackground=ACC, activeforeground=FG)
+                     activebackground=ACC, activeforeground=WHITE)
         menubar.add_cascade(label="Правка", menu=em)
         em.add_command(label="Очистить трей",        command=self._tray_clear)
         em.add_command(label="Очистить исходное изображение", command=self._clear_src)
 
         # Вид
         vm = tk.Menu(menubar, tearoff=0, bg=BG2, fg=FG,
-                     activebackground=ACC, activeforeground=FG)
+                     activebackground=ACC, activeforeground=WHITE)
         menubar.add_cascade(label="Вид", menu=vm)
         vm.add_command(label="Сбросить зум", command=self._cv_zoom_reset)
 
         # Справка
         hm = tk.Menu(menubar, tearoff=0, bg=BG2, fg=FG,
-                     activebackground=ACC, activeforeground=FG)
+                     activebackground=ACC, activeforeground=WHITE)
         menubar.add_cascade(label="Справка", menu=hm)
         hm.add_command(label="Об авторе", command=self._show_author)
+        hm.add_command(label="Горячие клавиши", command=lambda: messagebox.showinfo(
+            "Горячие клавиши", "Ctrl+O — открыть изображение\nCtrl+V — вставить изображение\n"
+            "Ctrl+S — сохранить проект\nCtrl+Shift+O — открыть проект\n"
+            "Ctrl+0 — вписать в окно\nCtrl+1 — реальный размер\n"
+            "Колесо — масштаб; средняя кнопка — перемещение\n"
+            "Esc — отменить контур; ПКМ — завершить контур"))
 
     def _build_toolbar(self):
-        for name, icon, label in TOOLS:
+        tk.Label(self._toolbar, text="ИНСТРУМЕНТЫ", bg=TOOL_BG, fg=FG2,
+                 font=("Segoe UI", 8, "bold")).pack(anchor=tk.W, padx=12, pady=(16, 10))
+        labels = {"auto": "Автонарезка", "shape": "Вырезание",
+                  "grid": "Сетка тайлов", "atlas": "Сборка атласа",
+                  "tiletest": "Проверка тайла", "resize": "Размеры файлов"}
+        for index, (name, icon, label) in enumerate(TOOLS, 1):
             f = tk.Frame(self._toolbar, bg=TOOL_BG, cursor="hand2")
             f.pack(fill=tk.X, pady=2, padx=2)
-            btn = tk.Button(f, text=f"{icon}\n{label}",
+            btn = SoftButton(f, text=labels[name],
                             command=lambda n=name: self._tool_set(n),
-                            bg=TOOL_BG, fg=FG, font=("Arial", 8), relief=tk.FLAT,
-                            activebackground=ACC, activeforeground=FG,
-                            cursor="hand2", width=6, height=3)
+                            bg=TOOL_BG, fg=FG, font=("Segoe UI", 10), height=44)
             btn.pack(fill=tk.X)
             self._tool_btns[name] = btn
 
@@ -355,12 +483,38 @@ class SpriteManufacturerApp:
     # ══════════════════════════════════════════════════════════════════
 
     def _tool_set(self, name):
+        if self.tool == "atlas":
+            self._atlas_excluded = self.excluded
+        else:
+            self._sprite_excluded = self.excluded
+        self.excluded = getattr(self, "_atlas_excluded" if name == "atlas" else "_sprite_excluded", set())
         self.tool = name
         for n, btn in self._tool_btns.items():
-            btn.config(bg=ACC if n == name else TOOL_BG)
+            btn.config(bg=GRN if n == name else TOOL_BG, fg=ACC if n == name else FG2)
         self._rebuild_props()
         self._rebind_canvas(name)
+        self._props_scroll.yview_moveto(0)
+        hints = {
+            "auto": "1. Найдите объекты → 2. Добавьте спрайты → 3. Экспортируйте результат",
+            "shape": "Тяните для выделения • ПКМ — завершить контур • Esc — отменить текущий контур",
+            "grid": "Задайте размер тайла или число ячеек, затем добавьте результат в спрайты",
+            "atlas": "Клик — исключить ячейку • Перетаскивание — изменить порядок",
+            "tiletest": "Тяните выделение слева; справа — проверка стыков тайла",
+            "resize": "Выберите папку, размер и место сохранения в панели справа",
+        }
+        self._tool_hint.set(hints[name] + "\nКолесо — масштаб • Средняя кнопка — перемещение")
+        self._view_title.config(text="Атлас текстур" if name == "atlas" else
+                                "Проверка бесшовности" if name == "tiletest" else
+                                "Пакетное изменение размеров" if name == "resize" else "Исходное изображение")
+        if name != "atlas":
+            self._tray_refresh()
         self._cv_draw()
+
+    def _save_current(self):
+        actions = {"auto": self._auto_save, "shape": self._sh_save,
+                   "grid": self._grid_save, "atlas": self._atlas_save,
+                   "tiletest": self._tc_save, "resize": self._resize_run}
+        actions[self.tool]()
 
     def _rebuild_props(self):
         for f in self._panels.values():
@@ -445,13 +599,14 @@ class SpriteManufacturerApp:
             if pil is None:
                 return
             iw, ih = pil.size
-            fit = min(cw/iw, ch/ih)
+            half = cw // 2 - 1
+            fit = min(half/iw, ch/ih)
             old = fit * self._tc_zoom
             ix = (e.x - self._tc_ox) / old
             iy = (e.y - self._tc_oy) / old
             self._tc_zoom = max(0.05, min(30.0, self._tc_zoom * factor))
             ns = fit * self._tc_zoom
-            self._tc_vx = int(e.x - ix*ns - (cw - int(iw*ns))//2)
+            self._tc_vx = int(e.x - ix*ns - (half - int(iw*ns))//2)
             self._tc_vy = int(e.y - iy*ns - (ch - int(ih*ns))//2)
             if hasattr(self, "_tc_zoom_lbl"):
                 self._tc_zoom_lbl.config(text=f"{int(self._tc_zoom*100)}%")
@@ -513,8 +668,47 @@ class SpriteManufacturerApp:
             self._cv_draw_atlas()
         elif self.tool == "tiletest":
             self._cv_draw_tiletest()
+        elif self.tool == "resize":
+            self._cv_draw_resize()
         else:
             self._cv_draw_source()
+        self._export_current_btn.config(
+            text="Обработать папку" if self.tool == "resize" else "Экспорт…",
+            state=tk.NORMAL if (self._resize_folder_var.get() and not getattr(self, "_resize_running", False) if self.tool == "resize" else
+                                self.src_img is not None) else tk.DISABLED)
+        image = (None if self.tool == "resize" else
+                 self._atlas_vis if self.tool == "atlas" else self._cv2pil(self.src_img))
+        if image is None:
+            self._zoom_var.set("—")
+        else:
+            width = self._canvas.winfo_width()
+            if self.tool == "tiletest":
+                width = width // 2 - 1
+            fit = min(width / image.width, self._canvas.winfo_height() / image.height)
+            zoom = self._tc_zoom if self.tool == "tiletest" else self._cv_zoom
+            self._zoom_var.set(f"{fit * zoom * 100:.0f}%")
+
+    def _cv_draw_resize(self):
+        cv = self._canvas
+        cv.delete("all")
+        width, height = cv.winfo_width(), cv.winfo_height()
+        files = getattr(self, "_resize_preview_files", [])
+        self._status_var.set("Пакетная обработка • Результаты сохраняются в отдельные файлы")
+        if not files:
+            cv.create_text(width//2, height//2-24, text="Изменение размеров файлов",
+                           fill=FG, font=("Segoe UI", 20), width=max(200, width-40))
+            cv.create_text(width//2, height//2+26,
+                           text="Выберите папку с изображениями в панели справа.\nЗадайте размер и место сохранения копий.",
+                           fill=FG2, font=("Segoe UI", 11), justify=tk.CENTER, width=max(200, width-40))
+            return
+        cv.create_text(24, 28, anchor=tk.W, text=f"Изображения в папке: {len(files)}",
+                       fill=FG, font=("Segoe UI", 16))
+        cv.create_text(24, 64, anchor=tk.W, text=self._resize_folder_var.get(),
+                       fill=FG2, font=("Segoe UI", 10), width=max(200, width-48))
+        for index, path in enumerate(files[:max(1, (height-130)//32)]):
+            cv.create_text(24, 112+index*32, anchor=tk.W,
+                           text=f"{index+1:02d}    {os.path.basename(path)}", fill=FG,
+                           font=("Segoe UI", 11), width=max(200, width-48))
 
     def _cv_draw_source(self):
         cv = self._canvas
@@ -522,9 +716,12 @@ class SpriteManufacturerApp:
         ch = cv.winfo_height() or 600
         cv.delete("all")
         if self.src_img is None:
-            cv.create_text(cw//2, ch//2,
-                text="Откройте изображение или перетащите сюда",
-                fill=FG2, font=("Arial", 13), justify=tk.CENTER)
+            cv.create_text(cw//2, ch//2-26,
+                text="Начните с изображения", fill=FG, font=("Segoe UI", 20), justify=tk.CENTER)
+            cv.create_text(cw//2, ch//2+24,
+                text="Перетащите файл сюда или нажмите Ctrl+O\nCtrl+V — вставить из буфера • Двойной клик — открыть",
+                fill=FG2, font=("Segoe UI", 11), justify=tk.CENTER, width=max(200, cw-40))
+            self._status_var.set("Готов к работе")
             return
         pil = self._cv2pil(self.src_img)
         if pil is None:
@@ -540,10 +737,13 @@ class SpriteManufacturerApp:
         disp = pil.resize((nw, nh), resamp)
         # Draw tool overlays on the PIL image
         disp = self._cv_overlay(disp, scale)
+        if disp.mode == "RGBA":
+            checker = self._tc_checker(nw, nh, cs=12).convert("RGBA")
+            disp = Image.alpha_composite(checker, disp)
         self._cv_photo = ImageTk.PhotoImage(disp)
         cv.create_image(self._cv_img_ox, self._cv_img_oy, anchor=tk.NW, image=self._cv_photo)
         # status
-        self._status_var.set(f"Зум: {int(self._cv_zoom*100)}%  |  {iw}×{ih} px  |  {os.path.basename(self.src_path) if self.src_path else ''}")
+        self._status_var.set(f"{iw}×{ih} px  |  {os.path.basename(self.src_path) if self.src_path else 'Из буфера'}")
 
     def _cv_overlay(self, disp, scale):
         """Draw tool-specific overlays on the display PIL image."""
@@ -556,7 +756,7 @@ class SpriteManufacturerApp:
                     ry1 = int(y*scale)
                     rx2 = int((x+w)*scale)
                     ry2 = int((y+h)*scale)
-                    draw.rectangle([rx1, ry1, rx2, ry2], outline="#00dc50", width=2)
+                    draw.rectangle([rx1, ry1, rx2, ry2], outline=ACC, width=2)
         elif self.tool == "shape":
             for i, (pts, _) in enumerate(self._sh_sels):
                 col = self._sh_colors[i % len(self._sh_colors)]
@@ -568,7 +768,7 @@ class SpriteManufacturerApp:
             if self._sh_down and self._sh_cur:
                 sc = [(int(px*scale), int(py*scale)) for px, py in self._sh_cur]
                 if len(sc) >= 2:
-                    draw.line(sc, fill="#ffff00", width=2)
+                    draw.line(sc, fill="#a36b20", width=2)
         elif self.tool == "grid":
             if self.src_img is not None and hasattr(self, "_grid_tiles_cache"):
                 for (x, y, tw, th) in self._grid_tiles_cache:
@@ -576,7 +776,7 @@ class SpriteManufacturerApp:
                     ry1 = int(y*scale)
                     rx2 = int((x+tw)*scale)
                     ry2 = int((y+th)*scale)
-                    draw.rectangle([rx1, ry1, rx2, ry2], outline="#00e050", width=1)
+                    draw.rectangle([rx1, ry1, rx2, ry2], outline=ACC, width=1)
         return disp
 
     def _cv_draw_atlas(self):
@@ -588,7 +788,7 @@ class SpriteManufacturerApp:
         if vis is None:
             cv.create_text(cw//2, ch//2,
                 text="Откройте изображение (Файл → Открыть)\nатлас будет собран автоматически",
-                fill=FG2, font=("Arial", 13), justify=tk.CENTER)
+                fill=FG2, font=("Segoe UI", 13), justify=tk.CENTER)
             return
         fit = min(cw/vis.width, ch/vis.height)
         scale = fit * self._cv_zoom
@@ -602,7 +802,7 @@ class SpriteManufacturerApp:
         cv.create_image(self._cv_img_ox, self._cv_img_oy, anchor=tk.NW, image=self._cv_photo)
         # info overlay
         info = f"{vis.width}×{vis.height}px  {self._atlas_cols_n}×{self._atlas_rows_n}  {self._atlas_cell_w}px/яч"
-        cv.create_text(cw-8, ch-8, text=info, anchor=tk.SE, fill=GOLD, font=("Arial", 9, "bold"))
+        cv.create_text(cw-8, ch-8, text=info, anchor=tk.SE, fill=GOLD, font=("Segoe UI", 9, "bold"))
         self._status_var.set(f"Атлас: {vis.width}×{vis.height}  Зум: {int(self._cv_zoom*100)}%")
 
     def _cv_draw_tiletest(self):
@@ -613,7 +813,7 @@ class SpriteManufacturerApp:
         if self.src_img is None:
             cv.create_text(cw//2, ch//2,
                 text="Откройте изображение для тайл-теста",
-                fill=FG2, font=("Arial", 13), justify=tk.CENTER)
+                fill=FG2, font=("Segoe UI", 13), justify=tk.CENTER)
             return
         # Split canvas: left=source, right=preview
         half = cw // 2 - 1
@@ -641,11 +841,11 @@ class SpriteManufacturerApp:
         for gx in range(0, iw+1, sz):
             cx2 = int(gx*scale)
             if 0 <= cx2 <= nw:
-                draw.line([(cx2,0),(cx2,nh-1)], fill="#3a3a5e", width=1)
+                draw.line([(cx2,0),(cx2,nh-1)], fill=BORDER, width=1)
         for gy in range(0, ih+1, sz):
             cy2 = int(gy*scale)
             if 0 <= cy2 <= nh:
-                draw.line([(0,cy2),(nw-1,cy2)], fill="#3a3a5e", width=1)
+                draw.line([(0,cy2),(nw-1,cy2)], fill=BORDER, width=1)
         sw = self._tc_sel_w.get() if hasattr(self, "_tc_sel_w") else sz
         sh = self._tc_sel_h.get() if hasattr(self, "_tc_sel_h") else sz
         if iw >= sw and ih >= sh:
@@ -653,13 +853,13 @@ class SpriteManufacturerApp:
             ry = int(self._tc_cy * scale)
             rw = max(2, int(sw*scale))
             rh = max(2, int(sh*scale))
-            draw.rectangle([rx, ry, rx+rw-1, ry+rh-1], outline="#ffff00", width=2)
-            draw.rectangle([rx+2, ry+2, rx+rw-3, ry+rh-3], outline="#ff6600", width=1)
+            draw.rectangle([rx, ry, rx+rw-1, ry+rh-1], outline="#a36b20", width=2)
+            draw.rectangle([rx+2, ry+2, rx+rw-3, ry+rh-3], outline="#ffffff", width=1)
         ph = ImageTk.PhotoImage(bg)
         self._tc_src_ph = ph
         self._canvas.create_image(self._tc_ox, self._tc_oy, anchor=tk.NW, image=ph)
         self._canvas.create_text(cw//2, ch-12, text="Исходное — тяните для смещения",
-                                  fill=FG2, font=("Arial", 8, "italic"))
+                                  fill=FG2, font=("Segoe UI", 8, "italic"))
 
     def _tc_draw_preview(self, cw, ch, ox):
         pil = self._cv2pil(self.src_img)
@@ -672,7 +872,7 @@ class SpriteManufacturerApp:
         n  = self._tc_grid_var.get() if hasattr(self, "_tc_grid_var") else 3
         if iw < sw or ih < sh:
             self._canvas.create_text(ox + cw//2, ch//2,
-                text=f"Изображение меньше {sw}×{sh}", fill=RED, font=("Arial", 11))
+                text=f"Изображение меньше {sw}×{sh}", fill=RED, font=("Segoe UI", 11))
             return
         x = max(0, min(self._tc_cx, iw-sw))
         y = max(0, min(self._tc_cy, ih-sh))
@@ -696,14 +896,14 @@ class SpriteManufacturerApp:
         self._canvas.create_image(px, py, anchor=tk.NW, image=ph2)
         self._canvas.create_text(ox + cw//2, ch-12,
             text=f"Тайл {n}×{n} — видны стыки",
-            fill=FG2, font=("Arial", 8, "italic"))
+            fill=FG2, font=("Segoe UI", 8, "italic"))
 
     def _tc_checker(self, w, h, cs=8):
         img  = Image.new("RGB", (w, h))
         draw = ImageDraw.Draw(img)
         for r in range((h+cs-1)//cs):
             for c in range((w+cs-1)//cs):
-                col = "#666666" if (r+c)%2==0 else "#999999"
+                col = "#efede7" if (r+c)%2==0 else "#d4d1c7"
                 x0, y0 = c*cs, r*cs
                 draw.rectangle([x0, y0, min(x0+cs,w)-1, min(y0+cs,h)-1], fill=col)
         return img
@@ -715,27 +915,22 @@ class SpriteManufacturerApp:
     def _build_props_auto(self, parent=None):
         p = parent if parent is not None else self._props
         self._lbl(p, "Авто-детекция", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
-        self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
-        row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
-        self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
-        self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbls["auto"] = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbls["auto"].pack(anchor=tk.W, pady=(2,0))
+        self._source_controls(p, "auto")
         self._sep(p)
         self._lbl(p, "Порог фона (200–255):").pack(anchor=tk.W)
-        self._auto_thresh = tk.Scale(p, from_=200, to=255, orient=tk.HORIZONTAL,
+        self._auto_thresh = SoftSlider(p, from_=200, to=255, orient=tk.HORIZONTAL,
                                      bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self._auto_thresh.set(245)
         self._auto_thresh.pack(fill=tk.X)
         self._auto_thresh.bind("<ButtonRelease-1>", lambda _: self._auto_run())
         self._lbl(p, "Мин. размер объекта (пикс):").pack(anchor=tk.W, pady=(8,0))
-        self._auto_min = tk.Scale(p, from_=5, to=150, orient=tk.HORIZONTAL,
+        self._auto_min = SoftSlider(p, from_=5, to=150, orient=tk.HORIZONTAL,
                                   bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self._auto_min.set(12)
         self._auto_min.pack(fill=tk.X)
         self._auto_min.bind("<ButtonRelease-1>", lambda _: self._auto_run())
         self._lbl(p, "Разделение (эрозия, пикс):").pack(anchor=tk.W, pady=(8,0))
-        self._auto_sep = tk.Scale(p, from_=0, to=150, orient=tk.HORIZONTAL,
+        self._auto_sep = SoftSlider(p, from_=0, to=150, orient=tk.HORIZONTAL,
                                   bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self._auto_sep.set(0)
         self._auto_sep.pack(fill=tk.X)
@@ -743,9 +938,11 @@ class SpriteManufacturerApp:
         self._auto_cnt_lbl = self._lbl(p, "Найдено: 0", color=GOLD, bold=True)
         self._auto_cnt_lbl.pack(anchor=tk.W, pady=8)
         self._sep(p)
-        self._btn(p, "▶  Запустить детекцию", self._auto_run, ACC, h=2).pack(fill=tk.X, pady=3)
-        self._btn(p, "➕  Добавить в трей", self._auto_add_to_tray, GRN, h=2).pack(fill=tk.X, pady=3)
+        self._btn(p, "Найти объекты", self._auto_run, ACC, h=2).pack(fill=tk.X, pady=3)
+        self._btn(p, "Добавить в спрайты", self._auto_add_to_tray, GRN, h=2).pack(fill=tk.X, pady=3)
+        self._btn(p, "Нарезать и сохранить…", self._auto_save, ACC, h=2).pack(fill=tk.X, pady=3)
         self._sep(p)
+        p = self._section(p, "Размеры и экспорт", expanded=False)
         self._lbl(p, "Масштаб при сохранении:", bold=True).pack(anchor=tk.W, pady=(0,4))
         if not hasattr(self, "_auto_scale_mode"):
             self._auto_scale_mode = tk.StringVar(value="none")
@@ -755,7 +952,7 @@ class SpriteManufacturerApp:
                          ("По ширине", "w"),
                          ("По высоте", "h"),
                          ("По ширине и высоте", "both")]:
-            tk.Radiobutton(p, text=txt, variable=self._auto_scale_mode, value=val,
+            SoftRadio(p, text=txt, variable=self._auto_scale_mode, value=val,
                            bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                            command=self._auto_scale_update).pack(anchor=tk.W)
         wf = tk.Frame(p, bg=BG); wf.pack(fill=tk.X, pady=(4,0))
@@ -773,17 +970,11 @@ class SpriteManufacturerApp:
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
         self._outdir_lbls["auto"] = self._lbl(p, "Папка не выбрана", color=FG2)
         self._outdir_lbls["auto"].pack(anchor=tk.W, pady=(3,0))
-        self._btn(p, "РАЗДЕЛИТЬ И СОХРАНИТЬ", self._auto_save, ACC, h=2).pack(fill=tk.X, pady=(10,3))
 
     def _build_props_shape(self, parent=None):
         p = parent if parent is not None else self._props
         self._lbl(p, "Вырезание фигур", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
-        self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
-        row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
-        self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
-        self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbls["shape"] = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbls["shape"].pack(anchor=tk.W)
+        self._source_controls(p, "shape")
         self._sep(p)
         self._lbl(p, "Инструмент рисования:", bold=True).pack(anchor=tk.W, pady=(0,5))
         if not hasattr(self, "_sh_tool_var"):
@@ -791,20 +982,21 @@ class SpriteManufacturerApp:
         for txt, val in [("Прямоугольник (тяни)", "rect"),
                          ("Многоугольник (клик→ПКМ)", "poly"),
                          ("Лассо (тяни→ПКМ)", "lasso")]:
-            tk.Radiobutton(p, text=txt, variable=self._sh_tool_var, value=val,
+            SoftRadio(p, text=txt, variable=self._sh_tool_var, value=val,
                            bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                            command=self._sh_reset).pack(anchor=tk.W)
         if not hasattr(self, "_sh_transp"):
             self._sh_transp = tk.BooleanVar(value=True)
-        tk.Checkbutton(p, text="Прозрачный фон при вырезании",
+        SoftCheck(p, text="Прозрачный фон при вырезании",
                        variable=self._sh_transp, bg=BG, fg=FG,
                        selectcolor=BTN, activebackground=BG).pack(anchor=tk.W, pady=(8,0))
         self._sep(p)
         self._lbl(p, "Выделения:", bold=True).pack(anchor=tk.W, pady=(0,4))
-        lf = tk.Frame(p, bg=BG2, bd=1, relief=tk.SUNKEN)
+        lf = tk.Frame(p, bg=INPUT, bd=0, highlightthickness=1, highlightbackground=BORDER)
         lf.pack(fill=tk.BOTH)
-        self._sh_lb = tk.Listbox(lf, bg=BG2, fg=FG, selectbackground=ACC,
-                                  height=5, font=("Arial", 9), relief=tk.FLAT,
+        self._sh_lb = tk.Listbox(lf, bg=INPUT, fg=FG, selectbackground=GRN,
+                                  selectforeground=FG, activestyle="none", selectborderwidth=0,
+                                  height=5, font=("Segoe UI", 9), relief=tk.FLAT,
                                   highlightthickness=0)
         self._sh_lb.pack(fill=tk.BOTH)
         for i, (pts, st) in enumerate(self._sh_sels):
@@ -816,27 +1008,22 @@ class SpriteManufacturerApp:
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
         self._outdir_lbls["shape"] = self._lbl(p, "Папка не выбрана", color=FG2)
         self._outdir_lbls["shape"].pack(anchor=tk.W, pady=(3,0))
-        self._btn(p, "✂  Вырезать → в трей", self._sh_apply, GRN, h=2).pack(fill=tk.X, pady=(8,3))
-        self._btn(p, "ВЫРЕЗАТЬ И СОХРАНИТЬ", self._sh_save, ACC, h=2).pack(fill=tk.X, pady=3)
+        self._btn(p, "Вырезать в спрайты", self._sh_apply, GRN, h=2).pack(fill=tk.X, pady=(8,3))
+        self._btn(p, "Вырезать и сохранить…", self._sh_save, ACC, h=2).pack(fill=tk.X, pady=3)
         self._lbl(p, "Esc — сброс  |  ПКМ — завершить", color=FG2, size=8).pack(anchor=tk.W)
 
     def _build_props_grid(self, parent=None):
         p = parent if parent is not None else self._props
         self._lbl(p, "Сетка тайлов", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
-        self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
-        row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
-        self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
-        self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbls["grid"] = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbls["grid"].pack(anchor=tk.W)
+        self._source_controls(p, "grid")
         self._sep(p)
         self._lbl(p, "Параметры сетки:", bold=True).pack(anchor=tk.W, pady=(0,5))
         if not hasattr(self, "_grid_mode"):
             self._grid_mode = tk.StringVar(value="size")
-        tk.Radiobutton(p, text="По размеру тайла", variable=self._grid_mode, value="size",
+        SoftRadio(p, text="По размеру тайла", variable=self._grid_mode, value="size",
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._grid_update).pack(anchor=tk.W)
-        tk.Radiobutton(p, text="По количеству ячеек", variable=self._grid_mode, value="count",
+        SoftRadio(p, text="По количеству ячеек", variable=self._grid_mode, value="count",
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._grid_update).pack(anchor=tk.W, pady=(0,6))
         if not hasattr(self, "_grid_tw"):
@@ -862,7 +1049,7 @@ class SpriteManufacturerApp:
         self._spinbox(of, self._grid_off_x, 0, 512, cmd=self._grid_update).pack(side=tk.LEFT, padx=2)
         self._lbl(of, "  Y:").pack(side=tk.LEFT)
         self._spinbox(of, self._grid_off_y, 0, 512, cmd=self._grid_update).pack(side=tk.LEFT, padx=2)
-        tk.Checkbutton(p, text="Пропускать пустые тайлы", variable=self._grid_skip,
+        SoftCheck(p, text="Пропускать пустые тайлы", variable=self._grid_skip,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._grid_update).pack(anchor=tk.W, pady=4)
         self._grid_cnt_lbl = self._lbl(p, "Тайлов: —", color=GOLD, bold=True)
@@ -871,39 +1058,29 @@ class SpriteManufacturerApp:
         self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
         self._outdir_lbls["grid"] = self._lbl(p, "Папка не выбрана", color=FG2)
         self._outdir_lbls["grid"].pack(anchor=tk.W, pady=(3,0))
-        self._btn(p, "➕  Добавить в трей", self._grid_to_tray, GRN, h=2).pack(fill=tk.X, pady=(8,3))
-        self._btn(p, "НАРЕЗАТЬ И СОХРАНИТЬ", self._grid_save, ACC, h=2).pack(fill=tk.X, pady=3)
+        self._btn(p, "Добавить в спрайты", self._grid_to_tray, GRN, h=2).pack(fill=tk.X, pady=(8,3))
+        self._btn(p, "Нарезать и сохранить…", self._grid_save, ACC, h=2).pack(fill=tk.X, pady=3)
 
     def _build_props_atlas(self, parent=None):
         p = parent if parent is not None else self._props
         self._lbl(p, "Сборка атласа", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
-        pf = tk.Frame(p, bg=BG); pf.pack(fill=tk.X, pady=(0,4))
-        self._btn(pf, "📂 Открыть проект", self.project_load, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
-        self._btn(pf, "💾 Сохранить проект", self.project_save, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
+        self._source_controls(p, "atlas")
 
-        s1 = self._section(p, "1. Изображение")
-        self._btn(s1, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
-        row = tk.Frame(s1, bg=BG); row.pack(fill=tk.X, pady=2)
-        self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
-        self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbls["atlas"] = self._lbl(s1, "Файл не выбран", color=FG2)
-        self._src_lbls["atlas"].pack(anchor=tk.W)
-
-        s2 = self._section(p, "2. Поиск объектов")
+        s2 = self._section(p, "Поиск объектов", expanded=False)
         self._lbl(s2, "Порог фона:").pack(anchor=tk.W)
-        self._atlas_thresh = tk.Scale(s2, from_=200, to=255, orient=tk.HORIZONTAL,
+        self._atlas_thresh = SoftSlider(s2, from_=200, to=255, orient=tk.HORIZONTAL,
                                       bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self._atlas_thresh.set(245)
         self._atlas_thresh.pack(fill=tk.X)
         self._atlas_thresh.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
         self._lbl(s2, "Мин. размер (пикс):").pack(anchor=tk.W, pady=(6,0))
-        self._atlas_min = tk.Scale(s2, from_=5, to=150, orient=tk.HORIZONTAL,
+        self._atlas_min = SoftSlider(s2, from_=5, to=150, orient=tk.HORIZONTAL,
                                    bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self._atlas_min.set(12)
         self._atlas_min.pack(fill=tk.X)
         self._atlas_min.bind("<ButtonRelease-1>", lambda _: self._atlas_update())
         self._lbl(s2, "Разделение (эрозия):").pack(anchor=tk.W, pady=(6,0))
-        self._atlas_sep = tk.Scale(s2, from_=0, to=150, orient=tk.HORIZONTAL,
+        self._atlas_sep = SoftSlider(s2, from_=0, to=150, orient=tk.HORIZONTAL,
                                    bg=BG, fg=FG, troughcolor=BTN, highlightthickness=0)
         self._atlas_sep.set(0)
         self._atlas_sep.pack(fill=tk.X)
@@ -911,7 +1088,7 @@ class SpriteManufacturerApp:
         self._atlas_cnt_lbl = self._lbl(s2, "Найдено: 0", color=GOLD, bold=True)
         self._atlas_cnt_lbl.pack(anchor=tk.W, pady=(6,0))
 
-        s3 = self._section(p, "3. Размер ячейки")
+        s3 = self._section(p, "Размер ячейки")
         pf3 = tk.Frame(s3, bg=BG); pf3.pack(fill=tk.X, pady=(0,4))
         for val in (16, 32, 64, 128, 256):
             self._btn(pf3, str(val), lambda v=val: self._atlas_preset(v),
@@ -926,15 +1103,15 @@ class SpriteManufacturerApp:
         if not hasattr(self, "_atlas_fit_mode"):
             self._atlas_fit_mode = tk.StringVar(value="trim")
         mf = tk.Frame(s3, bg=BG); mf.pack(fill=tk.X)
-        tk.Radiobutton(mf, text="Обрезка", variable=self._atlas_fit_mode, value="trim",
+        SoftRadio(mf, text="Обрезка", variable=self._atlas_fit_mode, value="trim",
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_mode_changed).pack(side=tk.LEFT, padx=(0,8))
-        tk.Radiobutton(mf, text="Масштаб", variable=self._atlas_fit_mode, value="scale",
+        SoftRadio(mf, text="Масштаб", variable=self._atlas_fit_mode, value="scale",
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_mode_changed).pack(side=tk.LEFT)
         if not hasattr(self, "_atlas_no_upscale"):
             self._atlas_no_upscale = tk.BooleanVar(value=True)
-        self._atlas_noup_chk = tk.Checkbutton(s3, text="Не увеличивать мелкие",
+        self._atlas_noup_chk = SoftCheck(s3, text="Не увеличивать мелкие",
                        variable=self._atlas_no_upscale, bg=BG, fg=FG,
                        selectcolor=BTN, activebackground=BG, command=self._atlas_update)
         self._atlas_noup_chk.pack(anchor=tk.W, pady=(2,0))
@@ -943,18 +1120,18 @@ class SpriteManufacturerApp:
         if not hasattr(self, "_atlas_align_w"):
             self._atlas_align_w = tk.BooleanVar(value=True)
             self._atlas_align_h = tk.BooleanVar(value=True)
-        tk.Checkbutton(alf, text="По ширине", variable=self._atlas_align_w,
+        SoftCheck(alf, text="По ширине", variable=self._atlas_align_w,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(side=tk.LEFT, padx=(0,8))
-        tk.Checkbutton(alf, text="По высоте", variable=self._atlas_align_h,
+        SoftCheck(alf, text="По высоте", variable=self._atlas_align_h,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(side=tk.LEFT)
 
-        s4 = self._section(p, "4. Дубликаты", expanded=False)
+        s4 = self._section(p, "Дубликаты", expanded=False)
         if not hasattr(self, "_atlas_dedup"):
             self._atlas_dedup = tk.BooleanVar(value=False)
             self._atlas_dedup_thresh = tk.IntVar(value=95)
-        tk.Checkbutton(s4, text="Убрать похожие", variable=self._atlas_dedup,
+        SoftCheck(s4, text="Убрать похожие", variable=self._atlas_dedup,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(anchor=tk.W)
         df = tk.Frame(s4, bg=BG); df.pack(fill=tk.X, pady=(4,0))
@@ -964,7 +1141,7 @@ class SpriteManufacturerApp:
         self._atlas_dedup_lbl = self._lbl(s4, "", color=FG2)
         self._atlas_dedup_lbl.pack(anchor=tk.W)
 
-        s5 = self._section(p, "5. Компоновка")
+        s5 = self._section(p, "Компоновка", expanded=False)
         gf = tk.Frame(s5, bg=BG); gf.pack(fill=tk.X, pady=2)
         self._lbl(gf, "Столбцов:").pack(side=tk.LEFT)
         if not hasattr(self, "_atlas_cols"):
@@ -973,7 +1150,7 @@ class SpriteManufacturerApp:
         self._atlas_cols.trace_add("write", lambda *_: self._atlas_update())
         if not hasattr(self, "_atlas_keep_order"):
             self._atlas_keep_order = tk.BooleanVar(value=True)
-        tk.Checkbutton(s5, text="Сохранять порядок", variable=self._atlas_keep_order,
+        SoftCheck(s5, text="Сохранять порядок", variable=self._atlas_keep_order,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
                        command=self._atlas_update).pack(anchor=tk.W, pady=(4,0))
         self._lbl(s5, "Перетащите ячейку: в центр другой — обмен, к краю (между ячейками) — вставка со сдвигом",
@@ -988,7 +1165,7 @@ class SpriteManufacturerApp:
         self._atlas_zoom_lbl.pack(side=tk.LEFT, padx=6)
         self._btn(zf, "↺", self._cv_zoom_reset, h=1).pack(side=tk.RIGHT)
 
-        s6 = self._section(p, "6. Сохранение")
+        s6 = self._section(p, "Сохранение")
         self._btn(s6, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
         self._outdir_lbls["atlas"] = self._lbl(s6, "Папка не выбрана", color=FG2)
         self._outdir_lbls["atlas"].pack(anchor=tk.W, pady=(3,0))
@@ -996,8 +1173,9 @@ class SpriteManufacturerApp:
         if not hasattr(self, "_atlas_name"):
             self._atlas_name = tk.StringVar(value="atlas")
             self._atlas_name_manual = False
-        tk.Entry(s6, textvariable=self._atlas_name, bg=BTN, fg=FG,
-                 relief=tk.FLAT, insertbackground=FG).pack(fill=tk.X, pady=(2,0))
+        tk.Entry(s6, textvariable=self._atlas_name, bg=INPUT, fg=FG,
+                 relief=tk.FLAT, insertbackground=FG, highlightthickness=1,
+                 highlightbackground=BORDER, highlightcolor="#a7b7a0").pack(fill=tk.X, pady=(2,0), ipady=5)
         ttk.Separator(s6, orient="horizontal").pack(fill=tk.X, pady=(10,6))
         self._atlas_export_btn = self._btn(s6, "📁 Сохранить спрайты по файлам",
                                            self._atlas_export_files, BTN)
@@ -1005,29 +1183,26 @@ class SpriteManufacturerApp:
 
         # Action buttons at bottom
         self._sep(p)
-        self._atlas_save_btn = self._btn(p, "СОБРАТЬ И СОХРАНИТЬ АТЛАС", self._atlas_save, ACC, h=2)
+        self._atlas_save_btn = self._btn(p, "Сохранить атлас…", self._atlas_save, ACC, h=2)
         self._atlas_save_btn.pack(fill=tk.X, pady=3)
-        self._atlas_overwrite_btn = self._btn(p, "↺ Перезаписать", self._atlas_overwrite, GOLD)
+        self._atlas_overwrite_btn = self._btn(p, "Перезаписать файл…", self._atlas_overwrite, BTN, state=tk.DISABLED)
         self._atlas_overwrite_btn.pack(fill=tk.X, pady=3)
+        self._atlas_target_lbl = self._lbl(p, "Сначала сохраните атлас, чтобы выбрать файл для перезаписи.", color=FG2, size=9)
+        self._atlas_target_lbl.pack(anchor=tk.W, pady=(2, 6))
 
     def _build_props_tiletest(self, parent=None):
         p = parent if parent is not None else self._props
         self._lbl(p, "Тайл-тест", bold=True, size=11).pack(anchor=tk.W, pady=(0,8))
-        self._btn(p, "Открыть изображение", self._menu_open_src, GRN, h=2).pack(fill=tk.X, pady=3)
-        row = tk.Frame(p, bg=BG); row.pack(fill=tk.X, pady=2)
-        self._btn(row, "Вставить Ctrl+V", self._global_paste, BTN, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,1))
-        self._btn(row, "Очистить", self._clear_src, RED, font_size=9).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(1,0))
-        self._src_lbls["tiletest"] = self._lbl(p, "Файл не выбран", color=FG2)
-        self._src_lbls["tiletest"].pack(anchor=tk.W)
+        self._source_controls(p, "tiletest")
         self._sep(p)
         self._lbl(p, "Размер тайла:", bold=True).pack(anchor=tk.W, pady=(0,5))
         if not hasattr(self, "_tc_size_var"):
             self._tc_size_var = tk.IntVar(value=64)
         szf = tk.Frame(p, bg=BG); szf.pack(fill=tk.X)
         for sz in (32, 64, 128, 256, 512):
-            tk.Radiobutton(szf, text=str(sz), variable=self._tc_size_var, value=sz,
+            SoftRadio(szf, text=str(sz), variable=self._tc_size_var, value=sz,
                            bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                           font=("Arial", 9, "bold"),
+                           font=("Segoe UI", 9, "bold"),
                            command=self._tc_size_changed).pack(side=tk.LEFT, padx=2)
         self._lbl(p, "Размер выбора:", color=FG2).pack(anchor=tk.W, pady=(8,2))
         slf = tk.Frame(p, bg=BG); slf.pack(fill=tk.X)
@@ -1044,9 +1219,9 @@ class SpriteManufacturerApp:
             self._tc_grid_var = tk.IntVar(value=3)
         grf = tk.Frame(p, bg=BG); grf.pack(fill=tk.X)
         for n in (3, 4, 5, 6, 7):
-            tk.Radiobutton(grf, text=f"{n}×{n}", variable=self._tc_grid_var, value=n,
+            SoftRadio(grf, text=f"{n}×{n}", variable=self._tc_grid_var, value=n,
                            bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                           font=("Arial", 9, "bold"),
+                           font=("Segoe UI", 9, "bold"),
                            command=self._cv_draw).pack(side=tk.LEFT, padx=2)
         self._sep(p)
         self._lbl(p, "Позиция среза:", bold=True).pack(anchor=tk.W, pady=(0,3))
@@ -1054,7 +1229,7 @@ class SpriteManufacturerApp:
         self._tc_offset_lbl.pack(anchor=tk.W)
         if not hasattr(self, "_tc_snap"):
             self._tc_snap = tk.BooleanVar(value=False)
-        tk.Checkbutton(p, text="Привязка к сетке тайлов", variable=self._tc_snap,
+        SoftCheck(p, text="Привязка к сетке тайлов", variable=self._tc_snap,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG).pack(anchor=tk.W, pady=(6,0))
         self._btn(p, "Сброс позиции (0,0)", self._tc_reset).pack(fill=tk.X, pady=(6,0))
         zf = tk.Frame(p, bg=BG); zf.pack(fill=tk.X, pady=(8,0))
@@ -1069,9 +1244,10 @@ class SpriteManufacturerApp:
         self._lbl(p, "Имя файла:").pack(anchor=tk.W, pady=(6,0))
         if not hasattr(self, "_tc_name_var"):
             self._tc_name_var = tk.StringVar(value="tile")
-        tk.Entry(p, textvariable=self._tc_name_var, bg=BTN, fg=FG,
-                 relief=tk.FLAT, insertbackground=FG).pack(fill=tk.X)
-        self._btn(p, "СОХРАНИТЬ ТАЙЛ", self._tc_save, ACC, h=2).pack(fill=tk.X, pady=(8,3))
+        tk.Entry(p, textvariable=self._tc_name_var, bg=INPUT, fg=FG,
+                 relief=tk.FLAT, insertbackground=FG, highlightthickness=1,
+                 highlightbackground=BORDER, highlightcolor="#a7b7a0").pack(fill=tk.X, ipady=5)
+        self._btn(p, "Сохранить тайл…", self._tc_save, ACC, h=2).pack(fill=tk.X, pady=(8,3))
     # ══════════════════════════════════════════════════════════════════
     #  DND SETUP
     # ══════════════════════════════════════════════════════════════════
@@ -1081,6 +1257,7 @@ class SpriteManufacturerApp:
         def _enter(e):
             try: widget.config(highlightthickness=3, highlightbackground=GRN)
             except tk.TclError: pass
+            return "copy"
         def _leave(e):
             try: widget.config(highlightthickness=0)
             except tk.TclError: pass
@@ -1088,16 +1265,62 @@ class SpriteManufacturerApp:
             try: widget.config(highlightthickness=0)
             except tk.TclError: pass
             paths = self._parse_drop_paths(e.data)
-            if not paths: return
+            if not paths:
+                messagebox.showwarning("Не удалось загрузить", "Не удалось разобрать список файлов.")
+                return "refuse_drop"
             if multi:
                 on_drop(paths)
             else:
                 for pp in paths:
                     if pp.lower().endswith(_IMG_EXTS) or os.path.isdir(pp):
                         on_drop(pp); break
-        widget.dnd_bind('<<DragEnter>>', _enter)
-        widget.dnd_bind('<<DragLeave>>', _leave)
+            return "copy"
+        widget.dnd_bind('<<DropEnter>>', _enter)
+        widget.dnd_bind('<<DropPosition>>', lambda _: "copy")
+        widget.dnd_bind('<<DropLeave>>', _leave)
         widget.dnd_bind('<<Drop>>', _drop)
+
+    def _handle_drop_paths(self, paths):
+        paths = list(dict.fromkeys(os.path.abspath(path) for path in paths))
+        if len(paths) == 1 and os.path.isdir(paths[0]):
+            self._tool_set("resize")
+            self._resize_set_folder(paths[0])
+            return
+        if len(paths) == 1 and paths[0].lower().endswith(".smproj"):
+            self.project_load(paths[0])
+            return
+        images, failures = [], []
+        for path in paths:
+            if not os.path.isfile(path) or not path.lower().endswith(_IMG_EXTS):
+                failures.append(path)
+                continue
+            try:
+                with Image.open(path) as image:
+                    images.append((path, image.convert("RGBA")))
+            except (OSError, ValueError):
+                failures.append(path)
+        if len(paths) == 1 and images:
+            self._load_src(images[0][0])
+        elif images:
+            if self.tool == "atlas":
+                self._load_src(images[0][0])
+                self._atlas_imported = True
+                self._atlas_raws = [image for _, image in images]
+                self._atlas_raw_boxes = [(index, 0, image.width, image.height)
+                                         for index, (_, image) in enumerate(images)]
+                self._atlas_order = list(self._atlas_raw_boxes)
+                self._atlas_update()
+            else:
+                if self.tool == "resize":
+                    self._tool_set("auto")
+                self._tray_add([image for _, image in images])
+                if self._outdir_auto:
+                    self.outdir = os.path.dirname(images[0][0])
+                    self._update_outdir_lbl(self.outdir)
+            self._status_var.set(f"Загружено файлов: {len(images)}")
+        if failures:
+            messagebox.showwarning("Пропущенные файлы",
+                "Не удалось загрузить:\n" + "\n".join(failures[:10]))
 
     # ══════════════════════════════════════════════════════════════════
     #  FILE OPERATIONS
@@ -1109,22 +1332,28 @@ class SpriteManufacturerApp:
         if path:
             self._load_src(path)
 
-    def _load_src(self, path):
-        arr = np.fromfile(path, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    def _load_src(self, path, from_clipboard=False):
+        try:
+            arr = np.fromfile(path, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+        except (OSError, cv2.error):
+            img = None
         if img is None:
             messagebox.showerror("Ошибка", f"Не удалось открыть:\n{path}")
-            return
+            return False
+        if img.dtype == np.uint16:
+            img = (img / 257).astype(np.uint8)
         self.src_img = img
-        self.src_path = path
+        self.src_path = "" if from_clipboard else os.path.abspath(path)
+        self._reset_source_state()
         self._cv_zoom = 1.0
         self._cv_view_x = 0
         self._cv_view_y = 0
         self._auto_contours_cache = []
-        if not self.outdir:
+        if not from_clipboard and (not self.outdir or self._outdir_auto):
             self.outdir = os.path.dirname(path)
             self._add_recent(self.outdir)
-        self._update_src_lbl(os.path.basename(path))
+        self._update_src_lbl("Из буфера" if from_clipboard else os.path.basename(path))
         self._update_outdir_lbl(self.outdir)
         self._status_var.set(f"Открыто: {os.path.basename(path)}  ({img.shape[1]}×{img.shape[0]})")
         if self.tool == "auto":
@@ -1136,9 +1365,12 @@ class SpriteManufacturerApp:
         else:
             self._cv_draw()
 
+        return True
+
     def _clear_src(self):
         self.src_img = None
         self.src_path = ""
+        self._reset_source_state()
         self._cv_zoom = 1.0
         self._cv_view_x = 0
         self._cv_view_y = 0
@@ -1150,8 +1382,33 @@ class SpriteManufacturerApp:
         d = filedialog.askdirectory()
         if d:
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
+
+    def _reset_source_state(self):
+        self._sh_clear()
+        self._tc_reset()
+        self._grid_tiles_cache = []
+        self._atlas_raws = []
+        self._atlas_raw_boxes = []
+        self._atlas_order = []
+        self._atlas_sheet = self._atlas_vis = None
+        self._atlas_last_out = None
+        self._atlas_imported = False
+        self._auto_cnt_lbl.config(text="Найдено: 0")
+        self._grid_cnt_lbl.config(text="Тайлов: —")
+        self._atlas_cnt_lbl.config(text="Найдено: 0")
+        self._atlas_size_lbl.config(text="Размер: —")
+        self._tc_zoom = 1.0
+        self._tc_vx = self._tc_vy = 0
+        self._sh_down = False
+        self._atlas_excluded = set()
+        if self.tool == "atlas":
+            self.excluded = self._atlas_excluded
+            self._tray_refresh_atlas_tray()
+        self._atlas_overwrite_btn.config(state=tk.DISABLED)
+        self._atlas_target_lbl.config(text="Сначала сохраните атлас, чтобы выбрать файл для перезаписи.")
 
     def _update_src_lbl(self, text):
         for lbl in self._src_lbls.values():
@@ -1173,6 +1430,7 @@ class SpriteManufacturerApp:
                 fd, path = tempfile.mkstemp(suffix='.png', prefix='imgcuter_')
                 os.close(fd)
                 data.save(path)
+                self._clipboard_temporary = path
                 return path
             if isinstance(data, list):
                 for pp in data:
@@ -1191,6 +1449,7 @@ class SpriteManufacturerApp:
                     fd, path = tempfile.mkstemp(suffix=ext, prefix='imgcuter_')
                     os.close(fd)
                     img.save(path)
+                    self._clipboard_temporary = path
                     return path
         except Exception:
             pass
@@ -1202,39 +1461,90 @@ class SpriteManufacturerApp:
                 fd, path = tempfile.mkstemp(suffix='.png', prefix='imgcuter_')
                 os.close(fd)
                 img.save(path)
+                self._clipboard_temporary = path
                 return path
         except Exception:
             pass
         return None
 
     def _global_paste(self, event=None):
+        if event is not None and isinstance(self.root.focus_get(), (tk.Entry, tk.Spinbox, tk.Text, ttk.Entry)):
+            return
         p = self._get_clipboard_path()
         if not p:
             messagebox.showinfo("Буфер", "В буфере нет изображения")
             return
-        self._load_src(p)
+        temporary = p == getattr(self, "_clipboard_temporary", None)
+        try:
+            self._load_src(p, from_clipboard=temporary)
+        finally:
+            if temporary:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+                self._clipboard_temporary = None
+        return "break"
 
     # ══════════════════════════════════════════════════════════════════
     #  CORE LOGIC UTILITIES
     # ══════════════════════════════════════════════════════════════════
 
     def _imwrite(self, path, img):
-        _, buf = cv2.imencode(".png", img)
-        buf.tofile(path)
+        self._atomic_image(self._cv2pil(img), path)
+
+    @staticmethod
+    def _atomic_write(path, writer, overwrite=False):
+        path = os.path.abspath(path)
+        fd, temporary = tempfile.mkstemp(prefix=".sprite-save-", suffix=".tmp", dir=os.path.dirname(path))
+        os.close(fd)
+        try:
+            writer(temporary)
+            if overwrite:
+                os.replace(temporary, path)
+            elif os.name == "nt":
+                os.rename(temporary, path)
+            else:
+                os.link(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _atomic_image(self, image, path, overwrite=False):
+        self._atomic_write(path, lambda temporary: image.save(temporary, format="PNG"), overwrite)
+
+    @staticmethod
+    def _safe_name(value, fallback):
+        name = "".join(character for character in value.strip()
+                       if character not in '\\/:*?"<>|' and ord(character) >= 32).strip(" .")
+        if name.lower().endswith(".png"):
+            name = name[:-4].rstrip(" .")
+        if not name:
+            name = fallback
+        if name.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", *[f"COM{i}" for i in range(1, 10)], *[f"LPT{i}" for i in range(1, 10)]}:
+            name = "_" + name
+        return name[:160]
+
+    def _confirm_replace(self, path):
+        original = bool(self.src_path) and os.path.normcase(os.path.realpath(path)) == os.path.normcase(os.path.realpath(self.src_path))
+        return messagebox.askyesno(
+            "Заменить исходное изображение?" if original else "Перезаписать файл?",
+            ("Исходное изображение будет заменено атласом.\n" if original else "Перезаписать этот файл?\n")
+            + os.path.abspath(path), default="no")
 
     def _cv2pil(self, img):
         if img is None:
             return None
         if len(img.shape) == 2:
-            return Image.fromarray(img)
+            return Image.fromarray(img).convert("RGBA")
         if img.shape[2] == 4:
             return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA))
-        return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).convert("RGBA")
 
     def _next_idx(self, folder, prefix, ext=".png"):
         idxs = []
         for f in os.listdir(folder):
-            if f.startswith(prefix) and f.endswith(ext):
+            if f.casefold().startswith(prefix.casefold()) and f.casefold().endswith(ext.casefold()):
                 try:
                     idxs.append(int(f[len(prefix):-len(ext)]))
                 except ValueError:
@@ -1242,31 +1552,26 @@ class SpriteManufacturerApp:
         return (max(idxs) + 1) if idxs else 0
 
     def _parse_drop_paths(self, data):
-        paths = []
-        data = data.strip()
-        i = 0
-        while i < len(data):
-            if data[i] == '{':
-                try:
-                    j = data.index('}', i)
-                    paths.append(data[i+1:j])
-                    i = j + 1
-                except ValueError:
-                    break
-            elif data[i] == ' ':
-                i += 1
-            else:
-                j = data.find(' ', i)
-                if j == -1:
-                    paths.append(data[i:])
-                    break
-                paths.append(data[i:j])
-                i = j
-        return [pp for pp in paths if pp]
+        try:
+            paths = self.root.tk.splitlist(data)
+        except tk.TclError:
+            return []
+        result = []
+        for path in paths:
+            if path.startswith("file:"):
+                parsed = urlparse(path)
+                path = unquote(parsed.path)
+                if parsed.netloc:
+                    path = "//" + parsed.netloc + path
+                elif os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+                    path = path[1:]
+            if path:
+                result.append(path)
+        return result
 
     def _auto_contours(self, img, tv, ms, sep=0):
         if img is None: return []
-        if len(img.shape) == 3 and img.shape[2] == 4:
+        if len(img.shape) == 3 and img.shape[2] == 4 and np.any(img[:, :, 3] < 255):
             alpha = img[:, :, 3]
             _, th = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
         else:
@@ -1363,7 +1668,7 @@ class SpriteManufacturerApp:
             excluded = i in self.excluded
             thumb = pil.copy()
             thumb.thumbnail((SZ-4, SZ-4), Image.LANCZOS)
-            cell = Image.new("RGBA", (SZ, SZ), (40, 43, 48, 255))
+            cell = self._tc_checker(SZ, SZ).convert("RGBA")
             ox = (SZ - thumb.width)  // 2
             oy = (SZ - thumb.height) // 2
             cell.paste(thumb, (ox, oy), thumb)
@@ -1373,7 +1678,7 @@ class SpriteManufacturerApp:
                 d = ImageDraw.Draw(cell)
                 d.line([(4, 4), (SZ-4, SZ-4)], fill=(255, 60, 60), width=2)
                 d.line([(SZ-4, 4), (4, SZ-4)], fill=(255, 60, 60), width=2)
-            border_col = "#cc2222" if excluded else "#3ba55c"
+            border_col = RED if excluded else BORDER
             d2 = ImageDraw.Draw(cell)
             d2.rectangle([0, 0, SZ-1, SZ-1], outline=border_col, width=2)
             photo = ImageTk.PhotoImage(cell)
@@ -1389,6 +1694,14 @@ class SpriteManufacturerApp:
         else:
             txt = f"Трей: {len(self.sprites)} спрайтов"
         self._tray_count_lbl.config(text=txt)
+        self._tray_actions(n_vis, len(self.sprites))
+        if not self.sprites:
+            tc.create_text(12, 32, anchor=tk.W, text="Здесь появятся нарезанные спрайты. Клик по миниатюре — исключить из экспорта.",
+                           fill=FG2, font=("Segoe UI", 10))
+
+    def _tray_actions(self, active, total):
+        self._tray_save_btn.config(state=tk.NORMAL if active else tk.DISABLED)
+        self._tray_clear_btn.config(state=tk.NORMAL if total else tk.DISABLED)
 
     def _tray_click(self, e):
         if self.tool == "atlas":
@@ -1397,10 +1710,6 @@ class SpriteManufacturerApp:
             cx = self._tray_canvas.canvasx(e.x)
             i = int(cx // (SZ + PAD))
             if 0 <= i < len(self._atlas_raws):
-                if i in self.excluded:
-                    self.excluded.discard(i)
-                else:
-                    self.excluded.add(i)
                 self._tray_drag_src = i
             return
         SZ, PAD = self._TRAY_SZ, self._TRAY_PAD
@@ -1427,7 +1736,7 @@ class SpriteManufacturerApp:
         j = self._tray_slot(e)
         if 0 <= j < len(self._atlas_raws) and j != src:
             x = PAD + j * (SZ + PAD)
-            tc.create_rectangle(x, PAD, x + SZ, PAD + SZ, outline="#ffd700",
+            tc.create_rectangle(x, PAD, x + SZ, PAD + SZ, outline="#a36b20",
                                 width=3, tags="drag_hl")
 
     def _tray_release(self, e):
@@ -1448,11 +1757,20 @@ class SpriteManufacturerApp:
             self._atlas_assemble()
 
     def _tray_clear(self):
+        if self.tool == "atlas":
+            self.excluded = set(range(len(self._atlas_raws)))
+            self._tray_refresh_atlas_tray()
+            self._atlas_assemble()
+            return
         self.sprites.clear()
         self.excluded.clear()
         self._tray_refresh()
 
+    @file_operation
     def _tray_save_all(self):
+        if self.tool == "atlas":
+            self._atlas_export_files()
+            return
         visible = [s for i, s in enumerate(self.sprites) if i not in self.excluded]
         if not visible:
             messagebox.showinfo("Трей пуст", "Нет спрайтов в трее (или все исключены)")
@@ -1461,11 +1779,12 @@ class SpriteManufacturerApp:
             d = filedialog.askdirectory()
             if not d: return
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
         idx = self._next_idx(self.outdir, "sprite_")
         for pil in visible:
-            pil.save(os.path.join(self.outdir, f"sprite_{idx:04d}.png"))
+            self._atomic_image(pil, os.path.join(self.outdir, f"sprite_{idx:04d}.png"))
             idx += 1
         messagebox.showinfo("Готово!", f"Сохранено {len(visible)} спрайтов в:\n{self.outdir}")
 
@@ -1546,6 +1865,7 @@ class SpriteManufacturerApp:
         self._tray_add(raws)
         messagebox.showinfo("Трей", f"Добавлено {len(raws)} спрайтов в трей")
 
+    @file_operation
     def _auto_save(self):
         if self.src_img is None:
             messagebox.showwarning("Ошибка", "Откройте изображение")
@@ -1554,6 +1874,7 @@ class SpriteManufacturerApp:
             d = filedialog.askdirectory()
             if not d: return
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
         tv  = self._auto_thresh.get() if hasattr(self, "_auto_thresh") else 245
@@ -1708,6 +2029,7 @@ class SpriteManufacturerApp:
             self._tray_add(raws)
             messagebox.showinfo("Трей", f"Добавлено {len(raws)} фигур в трей")
 
+    @file_operation
     def _sh_save(self):
         if not self._sh_sels or self.src_img is None:
             messagebox.showinfo("Нет выделений", "Нарисуйте выделения")
@@ -1716,6 +2038,7 @@ class SpriteManufacturerApp:
             d = filedialog.askdirectory()
             if not d: return
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
         pil = self._cv2pil(self.src_img)
@@ -1740,7 +2063,7 @@ class SpriteManufacturerApp:
                 crop = out.crop((x0, y0, x1, y1))
             else:
                 crop = base.crop((x0, y0, x1, y1)).convert("RGBA")
-            crop.save(os.path.join(self.outdir, f"cut_{idx:04d}.png"))
+            self._atomic_image(crop, os.path.join(self.outdir, f"cut_{idx:04d}.png"))
             idx += 1; saved += 1
         messagebox.showinfo("Готово!", f"Вырезано {saved} фигур в:\n{self.outdir}")
 
@@ -1817,6 +2140,7 @@ class SpriteManufacturerApp:
             self._tray_add(raws)
             messagebox.showinfo("Трей", f"Добавлено {len(raws)} тайлов в трей")
 
+    @file_operation
     def _grid_save(self):
         if self.src_img is None:
             messagebox.showwarning("Ошибка", "Откройте изображение")
@@ -1825,6 +2149,7 @@ class SpriteManufacturerApp:
             d = filedialog.askdirectory()
             if not d: return
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
         tiles = self._grid_tiles()
@@ -1849,6 +2174,8 @@ class SpriteManufacturerApp:
     # ══════════════════════════════════════════════════════════════════
 
     def _atlas_detect_raws(self):
+        if getattr(self, "_atlas_imported", False):
+            return self._atlas_raws
         img = self.src_img
         if img is None:
             self._atlas_raws = []
@@ -1983,15 +2310,15 @@ class SpriteManufacturerApp:
             return self._cv_img_ox + c*cw_, self._cv_img_oy + r*ch_
         if k is not None:
             x0, y0 = cell_xy(self._atl_src)
-            cv.create_rectangle(x0, y0, x0+cw_, y0+ch_, outline="#ff8800", width=3, tags="atl_hl")
+            cv.create_rectangle(x0, y0, x0+cw_, y0+ch_, outline="#a36b20", width=3, tags="atl_hl")
         dst, zn = self._atl_cell_at(e.x, e.y, zone=True)
         if dst is not None and dst != self._atl_src:
             x0, y0 = cell_xy(dst)
             if zn == "center":
-                cv.create_rectangle(x0, y0, x0+cw_, y0+ch_, outline="#ffd700", width=3, tags="atl_hl")
+                cv.create_rectangle(x0, y0, x0+cw_, y0+ch_, outline="#a36b20", width=3, tags="atl_hl")
             else:
                 lx = x0 if zn == "left" else x0 + cw_
-                cv.create_line(lx, y0, lx, y0+ch_, fill="#00e0ff", width=5, tags="atl_hl")
+                cv.create_line(lx, y0, lx, y0+ch_, fill=ACC, width=5, tags="atl_hl")
 
     def _atl_release(self, e):
         src = getattr(self, "_atl_src", None)
@@ -2072,7 +2399,7 @@ class SpriteManufacturerApp:
             r, c = divmod(i, cols)
             ox = c*cell_w + (cell_w-pil.width)//2
             oy = r*cell_h + (cell_h-pil.height)//2
-            sheet.paste(pil, (ox, oy), pil)
+            sheet.paste(pil, (ox, oy))
         return sheet, n, cell_w, cell_h, cols, rows
 
     def _atlas_assemble(self):
@@ -2105,7 +2432,7 @@ class SpriteManufacturerApp:
             excluded = i in self.excluded
             thumb = pil.copy()
             thumb.thumbnail((SZ-4, SZ-4), Image.LANCZOS)
-            cell = Image.new("RGBA", (SZ, SZ), (40, 43, 48, 255))
+            cell = self._tc_checker(SZ, SZ).convert("RGBA")
             ox = (SZ - thumb.width)  // 2
             oy = (SZ - thumb.height) // 2
             cell.paste(thumb, (ox, oy), thumb)
@@ -2115,7 +2442,7 @@ class SpriteManufacturerApp:
                 d = ImageDraw.Draw(cell)
                 d.line([(4,4),(SZ-4,SZ-4)], fill=(255,60,60), width=2)
                 d.line([(SZ-4,4),(4,SZ-4)], fill=(255,60,60), width=2)
-            border_col = "#cc2222" if excluded else "#3ba55c"
+            border_col = RED if excluded else BORDER
             d2 = ImageDraw.Draw(cell)
             d2.rectangle([0,0,SZ-1,SZ-1], outline=border_col, width=2)
             photo = ImageTk.PhotoImage(cell)
@@ -2129,6 +2456,7 @@ class SpriteManufacturerApp:
         txt = (f"Атлас-трей: {n_vis} из {len(raws)}  (исключено: {n_exc})" if n_exc
                else f"Атлас-трей: {len(raws)} объектов")
         self._tray_count_lbl.config(text=txt)
+        self._tray_actions(n_vis, len(raws))
 
     def _atlas_apply(self, sheet, n, cell_w, cell_h, cols, rows):
         total   = len(self._atlas_raws)
@@ -2152,13 +2480,13 @@ class SpriteManufacturerApp:
         self._atlas_cell_h = cell_h
         self._atlas_cols_n = cols
         self._atlas_rows_n = rows
-        vis = Image.new("RGB", sheet.size, (30, 33, 36))
+        vis = self._tc_checker(sheet.width, sheet.height, cs=12)
         vis.paste(sheet, (0, 0), sheet)
         draw = ImageDraw.Draw(vis)
         for r in range(rows):
             for c in range(cols):
                 x, y = c*cell_w, r*cell_h
-                draw.rectangle([x, y, x+cell_w-1, y+cell_h-1], outline="#00e050", width=1)
+                draw.rectangle([x, y, x+cell_w-1, y+cell_h-1], outline=ACC, width=1)
         self._atlas_vis = vis
         cell_txt = f"{cell_w}×{cell_h}" if cell_w != cell_h else f"{cell_w}"
         if hasattr(self, "_atlas_size_lbl"):
@@ -2180,6 +2508,7 @@ class SpriteManufacturerApp:
             self._atlas_noup_chk.config(state=state)
         self._atlas_update()
 
+    @file_operation
     def _atlas_save(self):
         if self.src_img is None:
             messagebox.showwarning("Ошибка", "Откройте изображение")
@@ -2188,6 +2517,7 @@ class SpriteManufacturerApp:
             d = filedialog.askdirectory()
             if not d: return
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
         sheet, n, *_ = self._atlas_build()
@@ -2195,29 +2525,25 @@ class SpriteManufacturerApp:
             messagebox.showwarning("Ошибка", "Объекты не найдены")
             return
         self._atlas_sheet = sheet
-        name = self._atlas_name.get().strip() if hasattr(self, "_atlas_name") else "atlas"
-        if not name: name = "atlas"
-        name = "".join(ch for ch in name if ch not in '\\/:*?"<>|')
-        if not name.lower().endswith(".png"):
-            name += ".png"
+        name = self._safe_name(self._atlas_name.get(), "atlas") + ".png"
         out = os.path.join(self.outdir, name)
-        if os.path.exists(out) and not messagebox.askyesno(
-                "Файл существует", f"«{name}» уже существует. Перезаписать?"):
+        existed = os.path.exists(out)
+        if existed and not self._confirm_replace(out):
             return
-        sheet.save(out)
+        self._atomic_image(sheet, out, overwrite=existed)
         self._atlas_last_out = out
+        self._atlas_target_lbl.config(text=f"Файл для перезаписи:\n{os.path.abspath(out)}")
         if hasattr(self, "_atlas_overwrite_btn"):
             self._atlas_overwrite_btn.config(state=tk.NORMAL)
         messagebox.showinfo("Готово!",
             f"Атлас {sheet.width}×{sheet.height}px, {n} объектов\nСохранён: {out}")
 
+    @file_operation
     def _atlas_overwrite(self):
         if self.src_img is None:
             messagebox.showwarning("Ошибка", "Откройте изображение")
             return
         target = self._atlas_last_out
-        if not target and self.src_path and os.path.isfile(self.src_path):
-            target = self.src_path
         if not target:
             self._atlas_save()
             return
@@ -2225,20 +2551,17 @@ class SpriteManufacturerApp:
         if sheet is None:
             messagebox.showwarning("Ошибка", "Объекты не найдены")
             return
-        if not messagebox.askyesno("Перезаписать?", f"Перезаписать файл:\n{target}"):
+        if not self._confirm_replace(target):
             return
-        try:
-            if target.lower().endswith((".jpg", ".jpeg", ".bmp")):
-                sheet.convert("RGB").save(target)
-            else:
-                sheet.save(target)
-        except Exception as ex:
-            messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{ex}")
+        if not target.lower().endswith(".png"):
+            messagebox.showerror("Ошибка", "Атлас сохраняется в PNG. Используйте «Сохранить атлас».")
             return
+        self._atomic_image(sheet, target, overwrite=True)
         self._atlas_last_out = target
         messagebox.showinfo("Готово!",
             f"Атлас {sheet.width}×{sheet.height}px, {n} объектов\nПерезаписан: {target}")
 
+    @file_operation
     def _atlas_export_files(self):
         if not self._atlas_raws:
             messagebox.showwarning("Ошибка", "Нет спрайтов")
@@ -2247,6 +2570,7 @@ class SpriteManufacturerApp:
             d = filedialog.askdirectory()
             if not d: return
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
         raws = [p for i, p in enumerate(self._atlas_raws) if i not in self.excluded]
@@ -2255,10 +2579,10 @@ class SpriteManufacturerApp:
         if not raws:
             messagebox.showwarning("Ошибка", "После фильтрации нет спрайтов")
             return
-        base = self._atlas_name.get() if hasattr(self, "_atlas_name") else "sprite"
+        base = self._safe_name(self._atlas_name.get(), "sprite")
         idx  = self._next_idx(self.outdir, base + "_")
         for pil in raws:
-            pil.save(os.path.join(self.outdir, f"{base}_{idx:04d}.png"))
+            self._atomic_image(pil, os.path.join(self.outdir, f"{base}_{idx:04d}.png"))
             idx += 1
         messagebox.showinfo("Готово!", f"Сохранено {len(raws)} спрайтов в:\n{self.outdir}")
 
@@ -2347,6 +2671,7 @@ class SpriteManufacturerApp:
     def _tc_release(self, _=None):
         self._tc_drag0 = None
 
+    @file_operation
     def _tc_save(self):
         if self.src_img is None:
             messagebox.showwarning("Ошибка", "Откройте изображение")
@@ -2355,6 +2680,7 @@ class SpriteManufacturerApp:
             d = filedialog.askdirectory()
             if not d: return
             self.outdir = d
+            self._outdir_auto = False
             self._add_recent(d)
             self._update_outdir_lbl(d)
         pil = self._cv2pil(self.src_img)
@@ -2366,21 +2692,21 @@ class SpriteManufacturerApp:
         if iw < sw or ih < sh:
             messagebox.showwarning("Ошибка", f"Изображение меньше {sw}×{sh}")
             return
-        name = self._tc_name_var.get().strip() if hasattr(self, "_tc_name_var") else "tile"
-        if not name: name = "tile"
+        name = self._safe_name(self._tc_name_var.get(), "tile")
         prefix = name + "_"
         x = max(0, min(self._tc_cx, iw-sw))
         y = max(0, min(self._tc_cy, ih-sh))
         tile = pil.crop((x, y, x+sw, y+sh))
         idx = self._next_idx(self.outdir, prefix)
         out = os.path.join(self.outdir, f"{prefix}{idx:04d}.png")
-        tile.save(out)
+        self._atomic_image(tile, out)
         messagebox.showinfo("Готово!", f"Кроп {sw}×{sh} сохранён:\n{out}")
 
     # ══════════════════════════════════════════════════════════════════
     #  PROJECT SAVE / LOAD
     # ══════════════════════════════════════════════════════════════════
 
+    @file_operation
     def project_save(self):
         path = filedialog.asksaveasfilename(
             title="Сохранить проект",
@@ -2412,56 +2738,121 @@ class SpriteManufacturerApp:
             buf = io.BytesIO()
             self._cv2pil(self.src_img).save(buf, format="PNG")
             data["source_data"] = base64.b64encode(buf.getvalue()).decode()
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        if getattr(self, "_atlas_imported", False):
+            data["imported_sprites"] = []
+            for image in self._atlas_raws:
+                buf = io.BytesIO()
+                image.save(buf, format="PNG")
+                data["imported_sprites"].append(base64.b64encode(buf.getvalue()).decode())
+            data["excluded"] = sorted(self.excluded if self.tool == "atlas" else getattr(self, "_atlas_excluded", set()))
+        def write_project(temporary):
+            with open(temporary, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        self._atomic_write(path, write_project, overwrite=True)
         messagebox.showinfo("Проект сохранён", f"Сохранено:\n{path}")
 
-    def project_load(self):
-        path = filedialog.askopenfilename(
+    def project_load(self, path=None):
+        path = path or filedialog.askopenfilename(
             title="Открыть проект",
             filetypes=[("Sprite Manufacturer Project", "*.smproj"), ("Все файлы", "*.*")])
-        if not path: return
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось прочитать файл проекта:\n{e}")
+        if not path:
             return
-        img = None
-        src_path = data.get("source_path", "")
-        if src_path and os.path.exists(src_path):
-            arr = np.fromfile(src_path, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
-        if img is None and "source_data" in data:
-            raw = base64.b64decode(data["source_data"])
-            arr = np.frombuffer(raw, np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
-            if not src_path:
-                src_path = "(встроено в проект)"
+        numeric = {
+            "atlas_thresh": ("_atlas_thresh", 245, 200, 255),
+            "atlas_min": ("_atlas_min", 12, 5, 150),
+            "atlas_sep": ("_atlas_sep", 0, 0, 150),
+            "atlas_cell": ("_atlas_cell", 64, 4, 2048),
+            "atlas_dedup_thresh": ("_atlas_dedup_thresh", 95, 50, 100),
+            "atlas_cols": ("_atlas_cols", 8, 1, 128),
+        }
+        boolean = {"atlas_no_upscale": True, "atlas_align_w": True,
+                   "atlas_align_h": True, "atlas_dedup": False}
+        try:
+            with open(path, encoding="utf-8") as file:
+                data = json.load(file)
+            if not isinstance(data, dict) or not isinstance(data.get("settings", {}), dict):
+                raise ValueError("Некорректная структура проекта")
+            settings = data.get("settings", {})
+            for key, (_, default, low, high) in numeric.items():
+                value = settings.get(key, default)
+                if type(value) is not int or not low <= value <= high:
+                    raise ValueError(f"Некорректная настройка: {key}")
+            for key, default in boolean.items():
+                if type(settings.get(key, default)) is not bool:
+                    raise ValueError(f"Некорректная настройка: {key}")
+            mode = settings.get("atlas_fit_mode", "trim")
+            if mode not in ("trim", "scale"):
+                raise ValueError("Некорректный режим подгонки")
+            for key in ("source_path", "outdir", "last_out"):
+                if not isinstance(data.get(key, ""), str):
+                    raise ValueError(f"Некорректный путь: {key}")
+            name = settings.get("atlas_name", "atlas")
+            if not isinstance(name, str):
+                raise ValueError("Некорректное имя атласа")
+            src_path = data.get("source_path", "")
+            image = None
+            # Restore the saved snapshot even if the original was overwritten.
+            if data.get("source_data"):
+                raw = base64.b64decode(data["source_data"], validate=True)
+                image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+                if image is None:
+                    raise ValueError("Повреждено встроенное изображение")
+            elif src_path and os.path.isfile(src_path):
+                image = cv2.imdecode(np.fromfile(src_path, np.uint8), cv2.IMREAD_UNCHANGED)
+                if image is None:
+                    raise ValueError("Не удалось прочитать исходное изображение")
+            elif src_path:
+                raise ValueError(f"Исходный файл не найден: {src_path}")
+            imported = []
+            payloads = data.get("imported_sprites", [])
+            if not isinstance(payloads, list):
+                raise ValueError("Некорректный список спрайтов")
+            for payload in payloads:
+                with Image.open(io.BytesIO(base64.b64decode(payload, validate=True))) as sprite:
+                    imported.append(sprite.convert("RGBA"))
+            excluded = data.get("excluded", [])
+            if not isinstance(excluded, list) or any(type(i) is not int or not 0 <= i < len(imported) for i in excluded):
+                raise ValueError("Некорректные исключения спрайтов")
+        except (OSError, ValueError, TypeError, cv2.error) as error:
+            messagebox.showerror("Ошибка проекта", f"Не удалось открыть проект:\n{error}")
+            return False
+
+        self.src_img = None
+        self.src_path = ""
+        self._reset_source_state()
+        self._cv_zoom_reset()
         self._tool_set("atlas")
-        s = data.get("settings", {})
-        if hasattr(self, "_atlas_thresh"): self._atlas_thresh.set(s.get("atlas_thresh", 245))
-        if hasattr(self, "_atlas_min"):    self._atlas_min.set(s.get("atlas_min", 12))
-        if hasattr(self, "_atlas_sep"):    self._atlas_sep.set(s.get("atlas_sep", 0))
-        if hasattr(self, "_atlas_cell"):   self._atlas_cell.set(s.get("atlas_cell", 64))
-        if hasattr(self, "_atlas_fit_mode"):     self._atlas_fit_mode.set(s.get("atlas_fit_mode", "trim"))
-        if hasattr(self, "_atlas_no_upscale"):   self._atlas_no_upscale.set(s.get("atlas_no_upscale", True))
-        if hasattr(self, "_atlas_align_w"):      self._atlas_align_w.set(s.get("atlas_align_w", True))
-        if hasattr(self, "_atlas_align_h"):      self._atlas_align_h.set(s.get("atlas_align_h", True))
-        if hasattr(self, "_atlas_dedup"):        self._atlas_dedup.set(s.get("atlas_dedup", False))
-        if hasattr(self, "_atlas_dedup_thresh"): self._atlas_dedup_thresh.set(s.get("atlas_dedup_thresh", 95))
-        if hasattr(self, "_atlas_cols"):         self._atlas_cols.set(s.get("atlas_cols", 8))
-        if hasattr(self, "_atlas_name"):         self._atlas_name.set(s.get("atlas_name", "atlas"))
+        for key, (attribute, default, _, _) in numeric.items():
+            getattr(self, attribute).set(settings.get(key, default))
+        for key, default in boolean.items():
+            getattr(self, "_" + key).set(settings.get(key, default))
+        self._atlas_fit_mode.set(mode)
+        self._atlas_name.set(name)
         self.outdir = data.get("outdir", "")
-        self._atlas_last_out = data.get("last_out") or None
+        self._outdir_auto = not bool(self.outdir)
         self._update_outdir_lbl(self.outdir or "Папка не выбрана")
-        if self._atlas_last_out and hasattr(self, "_atlas_overwrite_btn"):
-            self._atlas_overwrite_btn.config(state=tk.NORMAL)
-        if img is not None:
-            self.src_img  = img
-            self.src_path = src_path
-            self._update_src_lbl(os.path.basename(src_path))
+        self.src_img = image
+        if image is not None and image.dtype == np.uint16:
+            self.src_img = (image / 257).astype(np.uint8)
+        self.src_path = src_path
+        self._auto_contours_cache = []
+        self._update_src_lbl(os.path.basename(src_path) if src_path else
+                             "Из проекта" if image is not None else "Файл не выбран")
+        if imported:
+            self._atlas_imported = True
+            self._atlas_raws = imported
+            self._atlas_raw_boxes = [(i, 0, sprite.width, sprite.height) for i, sprite in enumerate(imported)]
+            self.excluded = set(excluded)
+        if image is not None:
             self._atlas_update()
+        saved_tool = data.get("tool", "atlas")
+        self._tool_set(saved_tool if isinstance(saved_tool, str) and saved_tool in self._panels else "atlas")
+        self._atlas_last_out = data.get("last_out") or None
+        self._atlas_overwrite_btn.config(state=tk.NORMAL if self._atlas_last_out else tk.DISABLED)
+        self._atlas_target_lbl.config(text=f"Файл для перезаписи:\n{os.path.abspath(self._atlas_last_out)}"
+                                      if self._atlas_last_out else "Сначала сохраните атлас, чтобы выбрать файл для перезаписи.")
+        self._status_var.set(f"Проект открыт: {os.path.basename(path)}")
+        return True
 
     # ══════════════════════════════════════════════════════════════════
     #  RESIZE PANEL
@@ -2480,9 +2871,9 @@ class SpriteManufacturerApp:
 
         if not hasattr(self, "_resize_recursive"):
             self._resize_recursive = tk.BooleanVar(value=False)
-        tk.Checkbutton(p, text="Сканировать подпапки", variable=self._resize_recursive,
+        SoftCheck(p, text="Сканировать подпапки", variable=self._resize_recursive,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                       font=("Arial", 9)).pack(anchor=tk.W, pady=(0, 6))
+                       font=("Segoe UI", 9)).pack(anchor=tk.W, pady=(0, 6))
 
         self._sep(p)
         self._lbl(p, "Целевой размер (px):", bold=True).pack(anchor=tk.W, pady=(0, 5))
@@ -2491,18 +2882,18 @@ class SpriteManufacturerApp:
             self._resize_size_var = tk.IntVar(value=64)
         szf = tk.Frame(p, bg=BG); szf.pack(fill=tk.X)
         for sz in (32, 64, 128, 256, 512):
-            tk.Radiobutton(szf, text=str(sz), variable=self._resize_size_var, value=sz,
+            SoftRadio(szf, text=str(sz), variable=self._resize_size_var, value=sz,
                            bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                           font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=2)
+                           font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=2)
 
         self._lbl(p, "Выравнивать по:", color=FG2).pack(anchor=tk.W, pady=(8, 2))
         if not hasattr(self, "_resize_axis"):
             self._resize_axis = tk.StringVar(value="both")
         axf = tk.Frame(p, bg=BG); axf.pack(fill=tk.X)
         for val, txt in (("both", "Оба (квадрат)"), ("width", "Ширина"), ("height", "Высота")):
-            tk.Radiobutton(axf, text=txt, variable=self._resize_axis, value=val,
+            SoftRadio(axf, text=txt, variable=self._resize_axis, value=val,
                            bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                           font=("Arial", 9)).pack(anchor=tk.W)
+                           font=("Segoe UI", 9)).pack(anchor=tk.W)
 
         self._sep(p)
         self._lbl(p, "Папка вывода:", bold=True).pack(anchor=tk.W, pady=(0, 3))
@@ -2512,26 +2903,45 @@ class SpriteManufacturerApp:
 
         if not hasattr(self, "_resize_same_folder"):
             self._resize_same_folder = tk.BooleanVar(value=False)
-        tk.Checkbutton(p, text="Сохранять рядом с оригиналом", variable=self._resize_same_folder,
+        SoftCheck(p, text="Сохранять рядом с оригиналом", variable=self._resize_same_folder,
                        bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
-                       font=("Arial", 9)).pack(anchor=tk.W, pady=(4, 0))
+                       font=("Segoe UI", 9)).pack(anchor=tk.W, pady=(4, 0))
 
         self._sep(p)
         self._resize_status_lbl = self._lbl(p, "", color=GOLD, bold=True)
         self._resize_status_lbl.pack(anchor=tk.W, pady=(0, 4))
 
-        self._btn(p, "ПРИМЕНИТЬ РЕСАЙЗ", self._resize_run, ACC, h=2).pack(fill=tk.X, pady=(4, 3))
+        self._resize_run_btn = self._btn(p, "Изменить размеры", self._resize_run, ACC, h=2)
+        self._resize_run_btn.pack(fill=tk.X, pady=(4, 3))
+        self._resize_cancel_btn = self._btn(p, "Остановить", self._resize_cancel, state=tk.DISABLED)
+        self._resize_cancel_btn.pack(fill=tk.X, pady=3)
+        self._lbl(p, "Оригиналы сохраняются. Копии рядом получают суффикс _resized.",
+                  color=FG2, size=9).pack(anchor=tk.W, pady=5)
+
+    def _resize_cancel(self):
+        self._resize_cancelled = True
 
     def _resize_pick_folder(self):
         folder = filedialog.askdirectory(title="Выберите папку с изображениями")
         if not folder:
             return
+        self._resize_set_folder(folder)
+
+    @file_operation
+    def _resize_set_folder(self, folder):
         self._resize_folder_var.set(folder)
+        self._resize_preview_files = sorted(os.path.join(folder, name) for name in os.listdir(folder)
+                                            if os.path.splitext(name)[1].lower() in _IMG_EXTS
+                                            and os.path.isfile(os.path.join(folder, name)))
+        self._cv_draw()
         short = folder if len(folder) <= 40 else "…" + folder[-37:]
         self._resize_folder_lbl.config(text=short)
         self._add_recent(folder)
 
+    @file_operation
     def _resize_run(self):
+        if getattr(self, "_resize_running", False):
+            return
         folder = self._resize_folder_var.get()
         if not folder or not os.path.isdir(folder):
             messagebox.showerror("Ошибка", "Папка не выбрана или не существует.")
@@ -2550,33 +2960,66 @@ class SpriteManufacturerApp:
         # Collect images
         files = []
         if recursive:
-            for root_dir, _, fnames in os.walk(folder):
+            for root_dir, dirs, fnames in os.walk(folder):
+                if outdir and os.path.normcase(os.path.realpath(outdir)) != os.path.normcase(os.path.realpath(folder)):
+                    dirs[:] = [name for name in dirs if os.path.normcase(os.path.realpath(os.path.join(root_dir, name))) != os.path.normcase(os.path.realpath(outdir))]
                 for fn in fnames:
                     if os.path.splitext(fn)[1].lower() in _IMG_EXTS:
                         files.append(os.path.join(root_dir, fn))
         else:
             for fn in os.listdir(folder):
-                if os.path.splitext(fn)[1].lower() in _IMG_EXTS:
+                if os.path.splitext(fn)[1].lower() in _IMG_EXTS and os.path.isfile(os.path.join(folder, fn)):
                     files.append(os.path.join(folder, fn))
 
         if not files:
             messagebox.showinfo("Пусто", "В выбранной папке нет изображений.")
             return
 
-        ok = 0
-        err = 0
-        for fpath in files:
+        self._resize_preview_files = files
+        if self.tool == "resize":
+            self._cv_draw()
+
+        self._resize_running = True
+        self._resize_cancelled = False
+        self._resize_run_btn.config(state=tk.DISABLED)
+        self._resize_cancel_btn.config(state=tk.NORMAL)
+        if self.tool == "resize":
+            self._export_current_btn.config(state=tk.DISABLED)
+        pending = iter(files)
+        counts = {"ok": 0, "err": 0, "processed": 0}
+
+        def finish():
+            self._resize_running = False
+            self._resize_run_btn.config(state=tk.NORMAL)
+            self._resize_cancel_btn.config(state=tk.DISABLED)
+            msg = f"{'Остановлено' if self._resize_cancelled else 'Готово'}: {counts['ok']} файлов"
+            if counts["err"]:
+                msg += f", ошибок: {counts['err']}"
+            self._resize_status_lbl.config(text=msg)
+            self._status_var.set(msg)
+            if self.tool == "resize":
+                self._export_current_btn.config(state=tk.NORMAL)
+
+        def step():
+            if self._resize_cancelled:
+                finish()
+                return
+            fpath = next(pending, None)
+            if fpath is None:
+                finish()
+                return
             try:
-                img = Image.open(fpath).convert("RGBA")
+                with Image.open(fpath) as original:
+                    img = original.convert("RGBA")
                 w, h = img.size
                 if axis == "both":
                     new_w, new_h = size, size
                 elif axis == "width":
                     new_w = size
-                    new_h = round(h * size / w) if w else size
+                    new_h = max(1, round(h * size / w)) if w else size
                 else:  # height
                     new_h = size
-                    new_w = round(w * size / h) if h else size
+                    new_w = max(1, round(w * size / h)) if h else size
                 img = img.resize((new_w, new_h), Image.LANCZOS)
 
                 if same:
@@ -2588,20 +3031,25 @@ class SpriteManufacturerApp:
 
                 # Force PNG to preserve transparency
                 base, ext = os.path.splitext(dst)
-                if ext.lower() not in (".png",):
-                    dst = base + ".png"
-                img.save(dst, "PNG")
-                ok += 1
+                dst = base + ".png"
+                if same or os.path.normcase(os.path.abspath(dst)) == os.path.normcase(os.path.abspath(fpath)):
+                    dst = base + "_resized.png"
+                candidate = dst
+                index = 1
+                while os.path.exists(candidate):
+                    candidate = os.path.splitext(dst)[0] + f"_{index}.png"
+                    index += 1
+                dst = candidate
+                self._atomic_image(img, dst)
+                counts["ok"] += 1
             except Exception as e:
                 print(f"resize error {fpath}: {e}")
-                err += 1
+                counts["err"] += 1
+            counts["processed"] += 1
+            self._resize_status_lbl.config(text=f"Обработано: {counts['processed']} / {len(files)}")
+            self.root.after(10, step)
 
-        msg = f"Готово: {ok} файлов"
-        if err:
-            msg += f", ошибок: {err}"
-        self._resize_status_lbl.config(text=msg)
-        self._status_var.set(msg)
-        messagebox.showinfo("Ресайз завершён", msg)
+        self.root.after(10, step)
 
     # ══════════════════════════════════════════════════════════════════
     #  MISC
@@ -2621,4 +3069,10 @@ if __name__ == "__main__":
     root = TkinterDnD.Tk()
     app = SpriteManufacturerApp(root)
     root.update()
+    if "--smoke-test" in sys.argv:
+        root.withdraw()
+        for name, _, _ in TOOLS:
+            app._tool_set(name)
+            root.update_idletasks()
+        root.after(100, root.destroy)
     root.mainloop()

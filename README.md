@@ -13,7 +13,9 @@
 
 **Sprite Manufacturer** — профессиональный инструмент для работы со спрайтами и атласами текстур. Единое рабочее пространство в стиле TexturePacker/Photoshop: левая панель инструментов, центральный холст с зумом и панорамой, правая панель настроек, нижний трей спрайтов.
 
-Цветовая схема: тёмный чарколь + янтарный акцент.
+Цветовая схема: светлая нейтральная тема — тёплый серый, белые поля, графитовый текст и сдержанный зелёный акцент. Общие команды открытия, вставки, сохранения проекта и экспорта находятся в верхней панели. Дополнительные настройки сворачиваются; панель параметров прокручивается колесом над полями.
+
+Кнопки со скруглением, мягкие переключатели и тонкие ползунки поддерживают управление мышью и клавиатурой. Для выбора вариантов доступны стрелки, для кнопок — Enter и пробел.
 
 ### Возможности
 
@@ -50,11 +52,16 @@
 - Целевые размеры: 32 / 64 / 128 / 256 / 512 px
 - Три режима выравнивания: **оба** (квадрат), **по ширине** (высота масштабируется), **по высоте** (ширина масштабируется)
 - Сохраняет прозрачность — все файлы конвертируются в PNG с каналом Alpha
-- Воспроизводит структуру подпапок в папке вывода; либо сохраняет файлы рядом с оригиналами
+- Воспроизводит структуру подпапок в папке вывода; либо сохраняет копии рядом с оригиналами с суффиксом `_resized`. Существующие файлы не перезаписываются
+- Показывает прогресс; обработку можно остановить между файлами
 
 ### Общие возможности
 - **Drag & Drop** — перетащите изображение прямо в окно
+- Несколько файлов добавляются в спрайты, а в режиме атласа собираются вместе; папка открывается для пакетной обработки, `.smproj` — как проект
+- Перезапись заменяет только ранее сохранённый атлас и показывает точный путь. Запись сначала выполняется во временный файл; ошибки записи не повреждают существующий результат
 - **Ctrl+V** — вставка из буфера обмена
+- **Ctrl+O** — открыть изображение; **Ctrl+S** — сохранить проект; **Ctrl+Shift+O** — открыть проект
+- **Ctrl+0** — вписать изображение в окно; **Ctrl+1** — реальный масштаб 1:1
 - **Трей спрайтов** — все нарезанные спрайты отображаются в нижней полосе; клик — включить/исключить из атласа
 - **Зум и панорама** — колёсико мыши + перетаскивание средней кнопкой
 - **Сохранение проекта** — формат `.smproj` (JSON + встроенное изображение base64), позволяет продолжить работу в любой момент
@@ -95,7 +102,7 @@ python gui_cutter.py
 
 **Sprite Manufacturer** is a professional tool for working with sprites and texture atlases. A unified workspace inspired by TexturePacker/Photoshop: left toolbar, center canvas with zoom & pan, right properties panel, bottom sprite tray.
 
-Color scheme: dark charcoal + amber accent.
+Color scheme: a neutral light theme with warm gray surfaces, white fields, graphite text, and restrained green accents. Common commands are available in the top bar, and advanced settings can be collapsed. The settings panel supports mouse-wheel scrolling over its controls.
 
 ### Features
 
@@ -132,10 +139,13 @@ Color scheme: dark charcoal + amber accent.
 - Target sizes: 32 / 64 / 128 / 256 / 512 px
 - Three axis modes: **both** (square), **width** (height scales proportionally), **height** (width scales proportionally)
 - Preserves transparency — all output files are saved as PNG with alpha channel
-- Mirrors the subfolder structure in the output directory; or saves files next to the originals
+- Mirrors the subfolder structure in the output directory; or saves copies next to the originals with a `_resized` suffix. Existing files are preserved
+- Shows progress and supports stopping between files
 
 ### General Features
 - **Drag & Drop** — drop an image directly into the window
+- Multiple files are imported as sprites or combined in atlas mode; folders open batch processing, and `.smproj` files open as projects
+- Overwrite targets the previously saved atlas and displays its full path. Files are written to a temporary file before replacement so write failures preserve the existing result
 - **Ctrl+V** — paste from clipboard
 - **Sprite Tray** — all sliced sprites appear in the bottom strip; click to include/exclude from the atlas
 - **Zoom & Pan** — mouse wheel + middle-button drag
