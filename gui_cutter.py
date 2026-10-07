@@ -283,6 +283,8 @@ class SpriteManufacturerApp:
         tray_hsb.pack(side=tk.BOTTOM, fill=tk.X)
         self._tray_canvas.configure(xscrollcommand=tray_hsb.set)
         self._tray_canvas.bind("<Button-1>", self._tray_click)
+        self._tray_canvas.bind("<B1-Motion>", self._tray_drag)
+        self._tray_canvas.bind("<ButtonRelease-1>", self._tray_release)
 
         # Status bar
         self._status_var = tk.StringVar(value="Готов")
@@ -399,6 +401,11 @@ class SpriteManufacturerApp:
             cv.bind("<ButtonPress-1>",   self._tc_press)
             cv.bind("<B1-Motion>",       self._tc_drag)
             cv.bind("<ButtonRelease-1>", self._tc_release)
+        elif name == "atlas":
+            cv.config(cursor="fleur")
+            cv.bind("<ButtonPress-1>",   self._atl_press)
+            cv.bind("<B1-Motion>",       self._atl_drag)
+            cv.bind("<ButtonRelease-1>", self._atl_release)
         else:
             cv.config(cursor="fleur")
             cv.bind("<ButtonPress-1>",   self._cv_pan_press)
@@ -964,6 +971,14 @@ class SpriteManufacturerApp:
             self._atlas_cols = tk.IntVar(value=8)
         self._spinbox(gf, self._atlas_cols, 1, 128, cmd=self._atlas_update).pack(side=tk.LEFT, padx=4)
         self._atlas_cols.trace_add("write", lambda *_: self._atlas_update())
+        if not hasattr(self, "_atlas_keep_order"):
+            self._atlas_keep_order = tk.BooleanVar(value=True)
+        tk.Checkbutton(s5, text="Сохранять порядок", variable=self._atlas_keep_order,
+                       bg=BG, fg=FG, selectcolor=BTN, activebackground=BG,
+                       command=self._atlas_update).pack(anchor=tk.W, pady=(4,0))
+        self._lbl(s5, "Перетащите ячейку: в центр другой — обмен, к краю (между ячейками) — вставка со сдвигом",
+                  color=FG2).pack(anchor=tk.W)
+        self._btn(s5, "⇄ Сбросить порядок", self._atlas_reset_order).pack(fill=tk.X, pady=(4,0))
         self._btn(s5, "↺ Обновить превью", self._atlas_update).pack(fill=tk.X, pady=(6,4))
         self._atlas_size_lbl = self._lbl(s5, "Размер: —", color=FG2)
         self._atlas_size_lbl.pack(anchor=tk.W)
@@ -994,8 +1009,6 @@ class SpriteManufacturerApp:
         self._atlas_save_btn.pack(fill=tk.X, pady=3)
         self._atlas_overwrite_btn = self._btn(p, "↺ Перезаписать", self._atlas_overwrite, GOLD)
         self._atlas_overwrite_btn.pack(fill=tk.X, pady=3)
-        if not self._atlas_last_out:
-            self._atlas_overwrite_btn.config(state=tk.DISABLED)
 
     def _build_props_tiletest(self, parent=None):
         p = parent if parent is not None else self._props
@@ -1388,8 +1401,7 @@ class SpriteManufacturerApp:
                     self.excluded.discard(i)
                 else:
                     self.excluded.add(i)
-                self._tray_refresh_atlas_tray()
-                self._atlas_assemble()
+                self._tray_drag_src = i
             return
         SZ, PAD = self._TRAY_SZ, self._TRAY_PAD
         cx = self._tray_canvas.canvasx(e.x)
@@ -1400,6 +1412,40 @@ class SpriteManufacturerApp:
             else:
                 self.excluded.add(i)
             self._tray_refresh()
+
+    def _tray_slot(self, e):
+        SZ, PAD = self._TRAY_SZ, self._TRAY_PAD
+        return int(self._tray_canvas.canvasx(e.x) // (SZ + PAD))
+
+    def _tray_drag(self, e):
+        src = getattr(self, "_tray_drag_src", None)
+        tc = self._tray_canvas
+        tc.delete("drag_hl")
+        if self.tool != "atlas" or src is None:
+            return
+        SZ, PAD = self._TRAY_SZ, self._TRAY_PAD
+        j = self._tray_slot(e)
+        if 0 <= j < len(self._atlas_raws) and j != src:
+            x = PAD + j * (SZ + PAD)
+            tc.create_rectangle(x, PAD, x + SZ, PAD + SZ, outline="#ffd700",
+                                width=3, tags="drag_hl")
+
+    def _tray_release(self, e):
+        src = getattr(self, "_tray_drag_src", None)
+        self._tray_drag_src = None
+        self._tray_canvas.delete("drag_hl")
+        if self.tool != "atlas" or src is None:
+            return
+        j = self._tray_slot(e)
+        if j != src and 0 <= j < len(self._atlas_raws):
+            self._atlas_swap(src, j)
+        elif j == src:
+            if src in self.excluded:
+                self.excluded.discard(src)
+            else:
+                self.excluded.add(src)
+            self._tray_refresh_atlas_tray()
+            self._atlas_assemble()
 
     def _tray_clear(self):
         self.sprites.clear()
@@ -1823,6 +1869,16 @@ class SpriteManufacturerApp:
         boxes = sorted([cv2.boundingRect(c) for c in contours],
                        key=lambda b: (b[1] // max(1, cell0), b[0]))
 
+        # Keep previous (incl. manually swapped) order; new boxes go to the end
+        # in default order. Order is matched by box identity.
+        keep = self._atlas_keep_order.get() if hasattr(self, "_atlas_keep_order") else True
+        prev = getattr(self, "_atlas_order", [])
+        if keep and prev:
+            present = set(boxes)
+            kept = [b for b in prev if b in present]
+            kept_set = set(kept)
+            boxes = kept + [b for b in boxes if b not in kept_set]
+
         # Remap excluded by box identity so resorting on cell-size change
         # doesn't shift crosses to wrong sprites.
         old_boxes = getattr(self, "_atlas_raw_boxes", [])
@@ -1840,8 +1896,121 @@ class SpriteManufacturerApp:
             self.excluded = set()
 
         self._atlas_raw_boxes = boxes
+        self._atlas_order = list(boxes)
         self._atlas_raws = raws
         return raws
+
+    def _atlas_swap(self, i, j):
+        n = len(self._atlas_raws)
+        if i == j or not (0 <= i < n and 0 <= j < n):
+            return
+        for lst in (self._atlas_raws, self._atlas_raw_boxes):
+            lst[i], lst[j] = lst[j], lst[i]
+        self._atlas_order = list(self._atlas_raw_boxes)
+        ei, ej = i in self.excluded, j in self.excluded
+        self.excluded.discard(i); self.excluded.discard(j)
+        if ei: self.excluded.add(j)
+        if ej: self.excluded.add(i)
+        self._tray_refresh_atlas_tray()
+        self._atlas_assemble()
+
+    def _atlas_move(self, src, dst, after):
+        """Take src out and insert it before/after dst; the rest shift."""
+        n = len(self._atlas_raws)
+        if not (0 <= src < n and 0 <= dst < n):
+            return
+        order = [i for i in range(n) if i != src]
+        order.insert(order.index(dst) + (1 if after else 0), src)
+        if order == list(range(n)):
+            return
+        self._atlas_raws = [self._atlas_raws[i] for i in order]
+        self._atlas_raw_boxes = [self._atlas_raw_boxes[i] for i in order]
+        self._atlas_order = list(self._atlas_raw_boxes)
+        self.excluded = {new for new, old in enumerate(order) if old in self.excluded}
+        self._tray_refresh_atlas_tray()
+        self._atlas_assemble()
+
+    def _atl_cell_at(self, x, y, zone=False):
+        """Raw index of the atlas cell under canvas point, or None.
+        With zone=True returns (index, 'left'|'center'|'right')."""
+        vis = self._atlas_vis
+        cmap = getattr(self, "_atlas_cell_map", [])
+        if vis is None or not cmap:
+            return (None, None) if zone else None
+        cw = self._canvas.winfo_width() or 800
+        ch = self._canvas.winfo_height() or 600
+        scale = min(cw/vis.width, ch/vis.height) * self._cv_zoom
+        ix = (x - self._cv_img_ox) / scale
+        iy = (y - self._cv_img_oy) / scale
+        if ix < 0 or iy < 0:
+            return (None, None) if zone else None
+        c = int(ix // self._atlas_cell_w)
+        r = int(iy // self._atlas_cell_h)
+        if c >= self._atlas_cols_n or r >= self._atlas_rows_n:
+            return (None, None) if zone else None
+        k = r * self._atlas_cols_n + c
+        if k >= len(cmap):
+            return (None, None) if zone else None
+        if not zone:
+            return cmap[k]
+        fx = (ix / self._atlas_cell_w) - c
+        return cmap[k], ("left" if fx < 0.25 else "right" if fx > 0.75 else "center")
+
+    def _atl_press(self, e):
+        self._canvas.focus_set()
+        self._atl_src = self._atl_cell_at(e.x, e.y)
+        self._atl_moved = False
+        if self._atl_src is None:
+            self._cv_pan_press(e)
+
+    def _atl_drag(self, e):
+        if self._atl_src is None:
+            self._cv_pan_drag(e)
+            return
+        self._atl_moved = True
+        cv = self._canvas
+        cv.delete("atl_hl")
+        vis = self._atlas_vis
+        cw = cv.winfo_width() or 800
+        ch = cv.winfo_height() or 600
+        scale = min(cw/vis.width, ch/vis.height) * self._cv_zoom
+        cmap = self._atlas_cell_map
+        k = cmap.index(self._atl_src) if self._atl_src in cmap else None
+        cw_, ch_ = self._atlas_cell_w * scale, self._atlas_cell_h * scale
+
+        def cell_xy(idx):
+            r, c = divmod(cmap.index(idx), self._atlas_cols_n)
+            return self._cv_img_ox + c*cw_, self._cv_img_oy + r*ch_
+        if k is not None:
+            x0, y0 = cell_xy(self._atl_src)
+            cv.create_rectangle(x0, y0, x0+cw_, y0+ch_, outline="#ff8800", width=3, tags="atl_hl")
+        dst, zn = self._atl_cell_at(e.x, e.y, zone=True)
+        if dst is not None and dst != self._atl_src:
+            x0, y0 = cell_xy(dst)
+            if zn == "center":
+                cv.create_rectangle(x0, y0, x0+cw_, y0+ch_, outline="#ffd700", width=3, tags="atl_hl")
+            else:
+                lx = x0 if zn == "left" else x0 + cw_
+                cv.create_line(lx, y0, lx, y0+ch_, fill="#00e0ff", width=5, tags="atl_hl")
+
+    def _atl_release(self, e):
+        src = getattr(self, "_atl_src", None)
+        self._atl_src = None
+        self._canvas.delete("atl_hl")
+        if src is None:
+            self._cv_pan_release()
+            return
+        dst, zn = self._atl_cell_at(e.x, e.y, zone=True)
+        if dst is None or dst == src:
+            return
+        if zn == "center":
+            self._atlas_swap(src, dst)
+        else:
+            self._atlas_move(src, dst, after=(zn == "right"))
+
+    def _atlas_reset_order(self):
+        self._atlas_order = []
+        self._atlas_update()
 
     def _atlas_build(self):
         cell0 = max(4, self._atlas_cell.get() if hasattr(self, "_atlas_cell") else 64)
@@ -1856,10 +2025,14 @@ class SpriteManufacturerApp:
         raws = [p for i, p in enumerate(raws_all) if i not in self.excluded]
         if not raws:
             return None, 0, cell0, cell0, 0, 0
+        cell_map = [i for i in range(len(raws_all)) if i not in self.excluded]
         removed = 0
         if hasattr(self, "_atlas_dedup") and self._atlas_dedup.get():
+            before = {id(p): i for i, p in zip(cell_map, raws)}
             raws, removed = self._dedup_raws(raws, self._atlas_dedup_thresh.get())
+            cell_map = [before[id(p)] for p in raws]
         self._atlas_removed = removed
+        self._atlas_cell_map = cell_map
         if not raws:
             return None, 0, cell0, cell0, 0, 0
         cell_w = cell0 if norm_w else max(p.width for p in raws)
@@ -2039,14 +2212,32 @@ class SpriteManufacturerApp:
             f"Атлас {sheet.width}×{sheet.height}px, {n} объектов\nСохранён: {out}")
 
     def _atlas_overwrite(self):
-        if not self._atlas_last_out or self.src_img is None: return
+        if self.src_img is None:
+            messagebox.showwarning("Ошибка", "Откройте изображение")
+            return
+        target = self._atlas_last_out
+        if not target and self.src_path and os.path.isfile(self.src_path):
+            target = self.src_path
+        if not target:
+            self._atlas_save()
+            return
         sheet, n, *_ = self._atlas_build()
         if sheet is None:
             messagebox.showwarning("Ошибка", "Объекты не найдены")
             return
-        sheet.save(self._atlas_last_out)
+        if not messagebox.askyesno("Перезаписать?", f"Перезаписать файл:\n{target}"):
+            return
+        try:
+            if target.lower().endswith((".jpg", ".jpeg", ".bmp")):
+                sheet.convert("RGB").save(target)
+            else:
+                sheet.save(target)
+        except Exception as ex:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{ex}")
+            return
+        self._atlas_last_out = target
         messagebox.showinfo("Готово!",
-            f"Атлас {sheet.width}×{sheet.height}px, {n} объектов\nПерезаписан: {self._atlas_last_out}")
+            f"Атлас {sheet.width}×{sheet.height}px, {n} объектов\nПерезаписан: {target}")
 
     def _atlas_export_files(self):
         if not self._atlas_raws:
