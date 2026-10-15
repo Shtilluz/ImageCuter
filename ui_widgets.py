@@ -2,6 +2,49 @@
 import tkinter as tk
 from tkinter import font as tkfont
 from PIL import Image, ImageDraw, ImageTk, ImageColor
+from ui_themes import palette
+
+
+class ToolTip:
+    """Small keyboard/mouse hints; no interaction is required to dismiss them."""
+    def __init__(self, widget, text, colors):
+        self.widget, self.text, self.colors = widget, text, colors
+        self.pending = self.window = None
+        widget.bind("<Enter>", self.schedule, add="+")
+        widget.bind("<FocusIn>", self.schedule, add="+")
+        for event in ("<Leave>", "<FocusOut>", "<ButtonPress>", "<Destroy>"):
+            widget.bind(event, self.hide, add="+")
+
+    def schedule(self, _=None):
+        self.hide()
+        self.pending = self.widget.after(550, self.show)
+
+    def show(self):
+        self.pending = None
+        if not self.widget.winfo_exists() or not self.widget.winfo_ismapped():
+            return
+        p = self.colors()
+        self.window = tk.Toplevel(self.widget)
+        self.window.wm_overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        label = tk.Label(self.window, text=self.text, bg=p.INPUT, fg=p.FG, justify="left",
+                         font=("Segoe UI", 9), wraplength=300, padx=10, pady=8,
+                         highlightthickness=1, highlightbackground=p.BORDER)
+        label.pack()
+        self.window.update_idletasks()
+        x = min(self.widget.winfo_rootx(), self.widget.winfo_screenwidth() - self.window.winfo_reqwidth() - 8)
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        if y + self.window.winfo_reqheight() > self.widget.winfo_screenheight():
+            y = self.widget.winfo_rooty() - self.window.winfo_reqheight() - 6
+        self.window.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def hide(self, _=None):
+        if self.pending is not None:
+            self.widget.after_cancel(self.pending)
+            self.pending = None
+        if self.window is not None:
+            self.window.destroy()
+            self.window = None
 
 
 def blend(first, second, amount):
@@ -14,6 +57,7 @@ class SoftButton(tk.Canvas):
                  font=("Segoe UI", 10), height=34, width=None, **kwargs):
         self.text, self.command = text, command
         self.fill, self.foreground = bg, fg
+        self.palette = palette("light")
         self.font = tkfont.Font(font=font)
         self.control_state = kwargs.pop("state", "normal")
         self.hover = self.pressed = False
@@ -67,6 +111,11 @@ class SoftButton(tk.Canvas):
 
     config = configure
 
+    def apply_theme(self, colors):
+        self.palette = colors
+        super().configure(bg=self.master.cget("bg"))
+        self._draw()
+
     def cget(self, key):
         values = {"state": self.control_state, "text": self.text, "bg": self.fill, "fg": self.foreground}
         return values[key] if key in values else super().cget(key)
@@ -79,14 +128,14 @@ class SoftButton(tk.Canvas):
         fill, foreground = self.fill, self.foreground
         if self.control_state == "disabled":
             fill = blend(fill, background, .8)
-            foreground = "#90958b"
+            foreground = self.palette.FG2
         elif self.pressed:
             fill = blend(fill, "#303b34", .10)
         elif self.hover:
             fill = blend(fill, "#ffffff", .16)
         image = Image.new("RGB", (width * 2, height * 2), background)
         draw = ImageDraw.Draw(image)
-        outline = "#a7b7a0" if self.focus_get() == self and self.control_state != "disabled" else fill
+        outline = self.palette.FOCUS if self.focus_get() == self and self.control_state != "disabled" else fill
         draw.rounded_rectangle((2, 2, width * 2 - 3, height * 2 - 3), radius=18,
                                fill=fill, outline=outline, width=2)
         self._photo = ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS))
@@ -100,6 +149,7 @@ class SoftChoice(tk.Canvas):
                  bg="#fbfaf7", fg="#303b34", font=("Segoe UI", 10), **kwargs):
         self.variable, self.value, self.command, self.radio = variable, value, command, radio
         self.text, self.foreground = text, fg
+        self.palette = palette("light")
         self.control_state = kwargs.pop("state", "normal")
         self.font = tkfont.Font(font=font)
         super().__init__(parent, bg=bg, highlightthickness=0, takefocus=1,
@@ -142,6 +192,8 @@ class SoftChoice(tk.Canvas):
         if cnf:
             kwargs.update(cnf)
         self.control_state = kwargs.pop("state", self.control_state)
+        self.foreground = kwargs.pop("fg", kwargs.pop("foreground", self.foreground))
+        self.text = kwargs.pop("text", self.text)
         if kwargs:
             super().configure(**kwargs)
         super().configure(takefocus=0 if self.control_state == "disabled" else 1,
@@ -150,31 +202,36 @@ class SoftChoice(tk.Canvas):
 
     config = configure
 
+    def apply_theme(self, colors):
+        self.palette = colors
+        self._draw()
+
     def cget(self, key):
-        return self.control_state if key == "state" else super().cget(key)
+        values = {"state": self.control_state, "fg": self.foreground, "foreground": self.foreground, "text": self.text}
+        return values[key] if key in values else super().cget(key)
 
     def _draw(self, *args):
         if not self.winfo_exists():
             return
         selected = self.variable.get() == self.value if self.radio else bool(self.variable.get())
         disabled = self.control_state == "disabled"
-        color = "#a8ada3" if disabled else "#63785c"
+        color = self.palette.FG2 if disabled else self.palette.ACC
         self.delete("all")
         if self.radio:
-            self.create_oval(3, 8, 17, 22, fill="white", outline=color if selected else "#c5c9c0", width=1.5)
+            self.create_oval(3, 8, 17, 22, fill=self.palette.INPUT, outline=color if selected else self.palette.BORDER, width=1.5)
             if selected:
                 self.create_oval(7, 12, 13, 18, fill=color, outline=color)
         else:
             self.create_polygon(6, 8, 15, 8, 18, 11, 18, 20, 15, 23, 6, 23, 3, 20, 3, 11,
-                                smooth=True, fill=color if selected else "white",
-                                outline=color if selected else "#c5c9c0")
+                                smooth=True, fill=color if selected else self.palette.INPUT,
+                                outline=color if selected else self.palette.BORDER)
             if selected:
-                self.create_line(6, 15, 10, 19, 15, 12, fill="white", width=2, capstyle="round", joinstyle="round")
+                self.create_line(6, 15, 10, 19, 15, 12, fill=self.palette.WHITE, width=2, capstyle="round", joinstyle="round")
         self.create_text(26, 15, anchor="w", text=self.text,
-                         fill="#969d91" if disabled else self.foreground, font=self.font)
+                         fill=self.palette.FG2 if disabled else self.foreground, font=self.font)
         if self.focus_get() == self:
             self.create_line(26, 27, min(self.winfo_width(), self.font.measure(self.text)+26), 27,
-                             fill="#a7b7a0", width=1)
+                             fill=self.palette.FOCUS, width=1)
 
 
 class SoftRadio(SoftChoice):
@@ -189,6 +246,7 @@ class SoftCheck(SoftChoice):
 class SoftSlider(tk.Canvas):
     def __init__(self, parent, from_=0, to=100, bg="#fbfaf7", fg="#303b34", **kwargs):
         self.low, self.high, self.value = from_, to, from_
+        self.palette = palette("light")
         super().__init__(parent, bg=bg, highlightthickness=0, takefocus=1, height=44, cursor="hand2")
         self.bind("<Configure>", self._draw)
         self.bind("<ButtonPress-1>", self._move)
@@ -200,6 +258,10 @@ class SoftSlider(tk.Canvas):
 
     def get(self):
         return self.value
+
+    def apply_theme(self, colors):
+        self.palette = colors
+        self._draw()
 
     def set(self, value):
         self.value = max(self.low, min(self.high, round(float(value))))
@@ -220,9 +282,9 @@ class SoftSlider(tk.Canvas):
         if width < 20:
             return
         x = 10 + (width - 20) * (self.value - self.low) / max(1, self.high - self.low)
-        self.create_text(width-10, 9, anchor="e", text=str(self.value), font=("Segoe UI", 9), fill="#727b6d")
-        self.create_line(10, 29, width-10, 29, fill="#e1e5dc", width=4, capstyle="round")
-        self.create_line(10, 29, x, 29, fill="#96ab8b", width=4, capstyle="round")
-        self.create_oval(x-7, 22, x+7, 36, fill="white", outline="#839977", width=2)
+        self.create_text(width-10, 9, anchor="e", text=str(self.value), font=("Segoe UI", 9), fill=self.palette.FG2)
+        self.create_line(10, 29, width-10, 29, fill=self.palette.BORDER, width=4, capstyle="round")
+        self.create_line(10, 29, x, 29, fill=self.palette.ACC, width=4, capstyle="round")
+        self.create_oval(x-7, 22, x+7, 36, fill=self.palette.INPUT, outline=self.palette.ACC, width=2)
         if self.focus_get() == self:
-            self.create_oval(x-10, 19, x+10, 39, outline="#becbb5")
+            self.create_oval(x-10, 19, x+10, 39, outline=self.palette.FOCUS)

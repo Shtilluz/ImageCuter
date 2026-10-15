@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +33,18 @@ class FileWorkflows(unittest.TestCase):
         self.dialogs.askyesno.return_value = True
         self.app._tool_set("auto")
         self.app._clear_src()
+        self.app._background_rgb = None
+        self.app._background_mode.set("auto")
+        self.app._auto_object_mode.set("objects")
+        self.app._auto_group_gap.set(0)
+        self.app._pixel_art.set(False)
+        self.app._edge_smooth.set(True)
+        self.app._edge_choke.set(0)
+        self.app._export_padding.set(0)
+        self.app._mask_tool.set("pan")
+        self.app._background_update_labels()
+        self.app._auto_thresh.set(10)
+        self.app._atlas_thresh.set(10)
         self.app.outdir = ""
         self.app._outdir_auto = True
         self.app.sprites.clear()
@@ -249,6 +262,204 @@ class FileWorkflows(unittest.TestCase):
         self.assertTrue(self.app.project_load(str(project)))
         self.assertEqual(len(self.app._atlas_raws), 2)
         self.assertEqual(self.app.excluded, {0})
+
+    def test_background_color_dialog_updates_both_panels(self):
+        with patch("gui_cutter.colorchooser.askcolor", return_value=((40, 150, 60), "#28963c")):
+            self.app._background_choose()
+        self.assertEqual(self.app._background_rgb, (40, 150, 60))
+        for label in self.app._background_labels:
+            self.assertIn("#28963C", label.cget("text"))
+        with patch("gui_cutter.colorchooser.askcolor", return_value=(None, None)):
+            self.app._background_choose()
+        self.assertEqual(self.app._background_rgb, (40, 150, 60))
+        self.app._background_auto()
+        self.assertIsNone(self.app._background_rgb)
+
+    def test_eyedropper_samples_source_with_zoom_and_pan_and_can_cancel(self):
+        self.app.src_img = np.full((80, 100, 3), (60, 150, 40), np.uint8)
+        self.app.src_img[30, 20] = (210, 90, 50)
+        self.app._background_start_pick()
+        self.assertTrue(self.app._background_picking)
+        self.app._cv_zoom = 2
+        self.app._cv_img_ox, self.app._cv_img_oy = -30, 15
+        # Fit = 2, zoom = 2, so each source pixel covers four canvas pixels.
+        with patch.object(self.app._canvas, "winfo_width", return_value=200), \
+                patch.object(self.app._canvas, "winfo_height", return_value=200):
+            self.app._auto_canvas_press(SimpleNamespace(x=-31, y=15))
+            self.assertTrue(self.app._background_picking)
+            self.app._auto_canvas_press(SimpleNamespace(x=52, y=137))
+        self.assertEqual(self.app._background_rgb, (50, 90, 210))
+        self.assertFalse(self.app._background_picking)
+        self.app._background_start_pick()
+        self.app._cancel_action()
+        self.assertFalse(self.app._background_picking)
+        self.assertEqual(self.app._background_rgb, (50, 90, 210))
+
+    def test_background_project_settings_roundtrip_and_legacy_threshold(self):
+        self.app._load_src(str(self.image("source.png")))
+        self.app._background_rgb = (40, 150, 60)
+        self.app._auto_thresh.set(23)
+        self.app._atlas_thresh.set(17)
+        project = self.folder / "background.smproj"
+        with patch("gui_cutter.filedialog.asksaveasfilename", return_value=str(project)):
+            self.app.project_save()
+        self.app._background_rgb = None
+        self.app._auto_thresh.set(0)
+        self.assertTrue(self.app.project_load(str(project)))
+        self.assertEqual(self.app._background_rgb, (40, 150, 60))
+        self.assertEqual(self.app._auto_thresh.get(), 23)
+        self.assertEqual(self.app._atlas_thresh.get(), 17)
+        project.write_text(json.dumps({"version": 3, "settings": {"atlas_thresh": 230}}))
+        self.assertTrue(self.app.project_load(str(project)))
+        self.assertEqual(self.app._atlas_thresh.get(), 25)
+        self.assertIsNone(self.app._background_rgb)
+
+    def test_bad_background_color_keeps_session(self):
+        source = self.image("source.png")
+        self.app._load_src(str(source))
+        project = self.folder / "bad-background.smproj"
+        project.write_text(json.dumps({"version": 4, "settings": {"background_rgb": [0, 0, 999]}}))
+        self.assertFalse(self.app.project_load(str(project)))
+        self.assertEqual(self.app.src_path, str(source))
+
+    def test_mask_brush_drag_undo_and_escape_preserve_source(self):
+        source = self.image("brush.png", "green", (80, 80))
+        self.app._load_src(str(source))
+        original = self.app.src_img.copy()
+        self.app._mask_tool.set("remove")
+        self.app._mask_radius.set(2)
+        with patch.object(self.app, "_mask_point", side_effect=[(20, 20), (40, 20)]):
+            self.app._auto_canvas_press(SimpleNamespace(x=0, y=0))
+            self.app._auto_canvas_drag(SimpleNamespace(x=0, y=0))
+            self.app._auto_canvas_release(SimpleNamespace())
+        self.assertEqual(self.app._auto_rgba_cache[20, 30, 3], 0)
+        np.testing.assert_array_equal(self.app.src_img, original)
+        self.app._mask_undo()
+        self.assertEqual(self.app._auto_rgba_cache[20, 30, 3], 255)
+        self.app._cancel_action()
+        self.assertEqual(self.app._mask_tool.get(), "pan")
+
+    def test_mask_refinement_and_output_settings_survive_project_roundtrip(self):
+        source = self.image("mask.png", "green", (80, 80))
+        self.app._load_src(str(source))
+        self.app._mask_marks = np.zeros((80, 80), np.uint8)
+        self.app._mask_marks[10:15, 10:15] = 1
+        self.app._mask_marks[20:25, 20:25] = 2
+        self.app._mask_revision += 1
+        self.app._auto_object_mode.set("single")
+        self.app._auto_group_gap.set(4)
+        self.app._pixel_art.set(True)
+        self.app._export_padding.set(2)
+        self.app._auto_run()
+        refined = self.app._auto_rgba_cache.copy()
+        refined[30:35, 30:35, 3] = 0
+        self.app._refined_rgba = refined
+        self.app._refined_key = self.app._background_signature(self.app.src_img, self.app._auto_thresh.get())
+        project = self.folder / "mask.smproj"
+        with patch("gui_cutter.filedialog.asksaveasfilename", return_value=str(project)):
+            self.app.project_save()
+        self.app._clear_src()
+        self.assertTrue(self.app.project_load(str(project)))
+        self.assertEqual(self.app._mask_marks[12, 12], 1)
+        self.assertEqual(self.app._mask_marks[22, 22], 2)
+        self.assertEqual(self.app._auto_object_mode.get(), "single")
+        self.assertEqual(self.app._auto_group_gap.get(), 4)
+        self.assertTrue(self.app._pixel_art.get())
+        self.assertEqual(self.app._export_padding.get(), 2)
+        np.testing.assert_array_equal(self.app._auto_rgba_cache, refined)
+
+    def test_bad_mask_project_preserves_session(self):
+        source = self.image("current.png")
+        self.app._load_src(str(source))
+        project = self.folder / "bad-mask.smproj"
+        import base64
+        from io import BytesIO
+        mask = BytesIO()
+        Image.new("L", (2, 2), 1).save(mask, format="PNG")
+        project.write_text(json.dumps({"version": 5, "source_path": str(source),
+                                       "mask_data": base64.b64encode(mask.getvalue()).decode()}))
+        self.assertFalse(self.app.project_load(str(project)))
+        self.assertEqual(self.app.src_path, str(source))
+
+    def test_soft_edges_and_raw_refinement_survive_project_roundtrip(self):
+        import cv2
+        from background_extractor import extract_foreground
+        image = np.full((80, 80, 3), 255, np.uint8)
+        cv2.circle(image, (40, 40), 25, (100, 140, 180), -1)
+        source = self.folder / "soft.png"
+        cv2.imwrite(str(source), image)
+        self.app._load_src(str(source))
+        self.app._edge_smooth.set(True)
+        self.app._edge_choke.set(2)
+        self.app._refined_rgba = extract_foreground(self.app.src_img)
+        self.app._refined_key = self.app._background_signature(self.app.src_img, self.app._auto_thresh.get())
+        self.app._auto_run()
+        expected = self.app._auto_rgba_cache.copy()
+        self.assertTrue(np.any((expected[:, :, 3] > 0) & (expected[:, :, 3] < 255)))
+        project = self.folder / "soft.smproj"
+        with patch("gui_cutter.filedialog.asksaveasfilename", return_value=str(project)):
+            self.app.project_save()
+        self.app._edge_smooth.set(False)
+        self.app._edge_choke.set(0)
+        self.assertTrue(self.app.project_load(str(project)))
+        self.assertTrue(self.app._edge_smooth.get())
+        self.assertEqual(self.app._edge_choke.get(), 2)
+        np.testing.assert_array_equal(self.app._auto_rgba_cache, expected)
+        # Projects saved before edge processing keep their previous output.
+        data = json.loads(project.read_text())
+        data["version"] = 5
+        del data["settings"]["edge_smooth"]
+        del data["settings"]["edge_choke"]
+        project.write_text(json.dumps(data))
+        self.assertTrue(self.app.project_load(str(project)))
+        self.assertFalse(self.app._edge_smooth.get())
+
+    def test_atlas_never_clips_large_sprite_to_cell_preset(self):
+        self.app._tool_set("atlas")
+        large = Image.new("RGBA", (120, 90), (20, 100, 230, 87))
+        self.app._atlas_raws = [large]
+        self.app._atlas_fit_mode.set("trim")
+        self.app._atlas_cell.set(32)
+        self.app._atlas_raws = [large]
+        sheet, _, cw, ch, _, _ = self.app._atlas_build()
+        self.assertGreaterEqual(cw, 120)
+        self.assertGreaterEqual(ch, 90)
+        np.testing.assert_array_equal(np.array(sheet), np.array(large))
+
+    def test_application_icon_contains_small_and_large_sizes(self):
+        resources = Path(__file__).parent / "resource"
+        with Image.open(resources / "Icon.ico") as icon:
+            self.assertTrue({(16, 16), (32, 32), (48, 48), (256, 256)} <= icon.ico.sizes())
+        self.assertEqual(len(self.app._icons), 6)
+
+    def test_refinement_finishes_in_background_and_updates_preview(self):
+        from test_background_extractor import sheet
+        self.app.src_img = sheet()
+        self.app._auto_run()
+        self.app._refine_start()
+        deadline = time.monotonic() + 10
+        while self.app._refine_running and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(.01)
+        self.assertFalse(self.app._refine_running)
+        self.assertIsNotNone(self.app._refined_rgba)
+        self.assertEqual(self.app._auto_rgba_cache[0, 0, 3], 0)
+        self.assertIn("уточнён", self.app._refine_status.cget("text"))
+
+    def test_refinement_failure_restores_controls_and_keeps_image(self):
+        from test_background_extractor import sheet
+        self.app.src_img = sheet()
+        original = self.app.src_img.copy()
+        with patch("gui_cutter.refine_foreground", side_effect=RuntimeError("processing failed")):
+            self.app._refine_start()
+            deadline = time.monotonic() + 5
+            while self.app._refine_running and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(.01)
+        self.assertFalse(self.app._refine_running)
+        self.assertEqual(self.app._refine_btn.cget("state"), "normal")
+        self.dialogs.showinfo.assert_called()
+        np.testing.assert_array_equal(self.app.src_img, original)
 
     def test_batch_skips_nested_output_and_directories_with_image_extension(self):
         self.image("source.png")

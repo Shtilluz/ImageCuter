@@ -12,7 +12,7 @@ a = Analysis(
     ['gui_cutter.py'],
     pathex=[],
     binaries=dnd_binaries,
-    datas=dnd_datas + [('resource', 'resource')],
+    datas=dnd_datas + [(os.path.join('resource', name), 'resource') for name in ('Icon.png', 'Icon.ico')],
     hiddenimports=dnd_hiddenimports,
     hookspath=[],
     hooksconfig={},
