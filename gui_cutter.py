@@ -22,6 +22,7 @@ from ui_widgets import SoftButton, SoftCheck, SoftRadio, SoftSlider, ToolTip
 from ui_themes import THEMES, THEME_NAMES, palette, translate_color
 from tkinterdnd2 import TkinterDnD, DND_FILES
 from background_extractor import bleed_transparent_colors, extract_foreground, refine_foreground, smooth_cutout_edges, sprite_regions
+from canvas_preview import resize_region, viewport_region
 
 CONFIG_FILE = os.path.join(os.path.dirname(sys.executable if getattr(sys, "frozen", False)
                                          else os.path.abspath(__file__)), "config.json")
@@ -51,6 +52,8 @@ def file_operation(method):
 class SpriteManufacturerApp:
     def __init__(self, root):
         self.root = root
+        self._closing = False
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
         self._config = {}
         self.recent_dirs = self._load_config()
         self._theme_name = self._config.get("theme", "light")
@@ -187,6 +190,20 @@ class SpriteManufacturerApp:
     # ══════════════════════════════════════════════════════════════════
     #  ICON / CONFIG
     # ══════════════════════════════════════════════════════════════════
+
+    def _close(self):
+        if self._closing:
+            return
+        self._closing = True
+        self._resize_cancelled = True
+        self._resize_running = self._refine_running = False
+        for tip in self._tooltips:
+            tip.hide()
+        # Cancel timers before widget destruction (refinement polling, batch
+        # steps and hints must not run against a destroyed Tcl application).
+        for identifier in self.root.tk.call("after", "info"):
+            self.root.after_cancel(identifier)
+        self.root.destroy()
 
     def _set_icon(self):
         resources = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resource")
@@ -740,7 +757,7 @@ class SpriteManufacturerApp:
         fm.add_command(label="Сохранить атлас",          command=self._atlas_save)
         fm.add_command(label="Сохранить спрайты по файлам", command=self._tray_save_all)
         fm.add_separator()
-        fm.add_command(label="Выход", command=self.root.destroy)
+        fm.add_command(label="Выход", command=self._close)
 
         # Правка
         em = tk.Menu(menubar, tearoff=0, bg=self.palette.BG2, fg=self.palette.FG,
@@ -1008,6 +1025,8 @@ class SpriteManufacturerApp:
     # ══════════════════════════════════════════════════════════════════
 
     def _cv_draw(self):
+        if getattr(self, "_closing", False):
+            return
         self._welcome_panel.place_forget()
         if self.tool == "atlas":
             self._cv_draw_atlas()
@@ -1088,57 +1107,62 @@ class SpriteManufacturerApp:
         self._cv_img_ox = (cw-nw)//2 + self._cv_view_x
         self._cv_img_oy = (ch-nh)//2 + self._cv_view_y
         resamp = self._resampling()
-        disp = pil.resize((nw, nh), resamp)
+        box = viewport_region((nw, nh), (self._cv_img_ox, self._cv_img_oy), (cw, ch))
+        if box is None:
+            return
+        disp = resize_region(pil, (nw, nh), box, resamp)
         # Draw tool overlays on the PIL image
-        disp = self._cv_overlay(disp, scale)
+        disp = self._cv_overlay(disp, scale, box[:2], (nw, nh))
         if disp.mode == "RGBA":
             if self.tool == "auto" and self._preview_bg.get() != "Клетка":
-                checker = Image.new("RGBA", (nw, nh), "#f8f8f8" if self._preview_bg.get() == "Светлый" else "#171c24")
+                checker = Image.new("RGBA", disp.size, "#f8f8f8" if self._preview_bg.get() == "Светлый" else "#171c24")
             else:
-                checker = self._tc_checker(nw, nh, cs=12).convert("RGBA")
+                checker = self._tc_checker(*disp.size, cs=12, offset=box[:2]).convert("RGBA")
             disp = Image.alpha_composite(checker, disp)
         self._cv_photo = ImageTk.PhotoImage(disp)
-        cv.create_image(self._cv_img_ox, self._cv_img_oy, anchor=tk.NW, image=self._cv_photo)
+        cv.create_image(self._cv_img_ox + box[0], self._cv_img_oy + box[1], anchor=tk.NW, image=self._cv_photo)
         # status
         self._status_var.set(f"{iw}×{ih} px  |  {os.path.basename(self.src_path) if self.src_path else 'Из буфера'}")
 
-    def _cv_overlay(self, disp, scale):
+    def _cv_overlay(self, disp, scale, offset=(0, 0), scaled_size=None):
         """Draw tool-specific overlays on the display PIL image."""
+        dx, dy = offset
         if self.tool == "auto" and self._mask_marks is not None and self._mask_tool.get() != "pan":
             overlay = np.zeros((*self._mask_marks.shape, 4), np.uint8)
             overlay[self._mask_marks == 1] = (70, 190, 100, 100)
             overlay[self._mask_marks == 2] = (220, 70, 55, 100)
-            layer = Image.fromarray(overlay).resize(disp.size, Image.Resampling.NEAREST)
+            layer = resize_region(Image.fromarray(overlay), scaled_size or disp.size,
+                                  (dx, dy, dx + disp.width, dy + disp.height), Image.Resampling.NEAREST)
             disp = Image.alpha_composite(disp.convert("RGBA"), layer)
         draw = ImageDraw.Draw(disp)
         if self.tool == "auto" and self._background_preview.get() and not self._background_picking:
             if self.src_img is not None and hasattr(self, "_auto_contours_cache"):
                 for c in self._auto_contours_cache:
                     x, y, w, h = cv2.boundingRect(c)
-                    rx1 = int(x*scale)
-                    ry1 = int(y*scale)
-                    rx2 = int((x+w)*scale)
-                    ry2 = int((y+h)*scale)
+                    rx1 = int(x*scale) - dx
+                    ry1 = int(y*scale) - dy
+                    rx2 = int((x+w)*scale) - dx
+                    ry2 = int((y+h)*scale) - dy
                     draw.rectangle([rx1, ry1, rx2, ry2], outline=self.palette.ACC, width=2)
         elif self.tool == "shape":
             for i, (pts, _) in enumerate(self._sh_sels):
                 col = self._sh_colors[i % len(self._sh_colors)]
-                sc = [(int(px*scale), int(py*scale)) for px, py in pts]
+                sc = [(int(px*scale) - dx, int(py*scale) - dy) for px, py in pts]
                 if len(sc) >= 2:
                     draw.polygon(sc, outline=col)
                 for p in sc:
                     draw.ellipse([p[0]-3, p[1]-3, p[0]+3, p[1]+3], fill=col)
             if self._sh_down and self._sh_cur:
-                sc = [(int(px*scale), int(py*scale)) for px, py in self._sh_cur]
+                sc = [(int(px*scale) - dx, int(py*scale) - dy) for px, py in self._sh_cur]
                 if len(sc) >= 2:
                     draw.line(sc, fill="#a36b20", width=2)
         elif self.tool == "grid":
             if self.src_img is not None and hasattr(self, "_grid_tiles_cache"):
                 for (x, y, tw, th) in self._grid_tiles_cache:
-                    rx1 = int(x*scale)
-                    ry1 = int(y*scale)
-                    rx2 = int((x+tw)*scale)
-                    ry2 = int((y+th)*scale)
+                    rx1 = int(x*scale) - dx
+                    ry1 = int(y*scale) - dy
+                    rx2 = int((x+tw)*scale) - dx
+                    ry2 = int((y+th)*scale) - dy
                     draw.rectangle([rx1, ry1, rx2, ry2], outline=self.palette.ACC, width=1)
         return disp
 
@@ -1160,9 +1184,11 @@ class SpriteManufacturerApp:
         self._cv_img_ox = (cw-nw)//2 + self._cv_view_x
         self._cv_img_oy = (ch-nh)//2 + self._cv_view_y
         resamp = Image.NEAREST if scale > 3 else Image.LANCZOS
-        disp = vis.resize((nw, nh), resamp)
-        self._cv_photo = ImageTk.PhotoImage(disp)
-        cv.create_image(self._cv_img_ox, self._cv_img_oy, anchor=tk.NW, image=self._cv_photo)
+        box = viewport_region((nw, nh), (self._cv_img_ox, self._cv_img_oy), (cw, ch))
+        if box is not None:
+            disp = resize_region(vis, (nw, nh), box, resamp)
+            self._cv_photo = ImageTk.PhotoImage(disp)
+            cv.create_image(self._cv_img_ox + box[0], self._cv_img_oy + box[1], anchor=tk.NW, image=self._cv_photo)
         # info overlay
         info = f"{vis.width}×{vis.height}px  {self._atlas_cols_n}×{self._atlas_rows_n}  {self._atlas_cell_w}px/яч"
         cv.create_text(cw-8, ch-8, text=info, anchor=tk.SE, fill=self.palette.GOLD, font=("Segoe UI", 9, "bold"))
@@ -1196,31 +1222,35 @@ class SpriteManufacturerApp:
         self._tc_scale = scale
         self._tc_ox = (cw-nw)//2 + self._tc_vx
         self._tc_oy = (ch-nh)//2 + self._tc_vy
-        bg = self._tc_checker(nw, nh)
-        scaled = pil.resize((nw, nh), Image.LANCZOS)
+        box = viewport_region((nw, nh), (self._tc_ox, self._tc_oy), (cw, ch))
+        if box is None:
+            return
+        dx, dy = box[:2]
+        scaled = resize_region(pil, (nw, nh), box, self._resampling())
+        bg = self._tc_checker(*scaled.size, offset=(dx, dy))
         bg.paste(scaled.convert("RGB"), mask=scaled.split()[3])
         draw = ImageDraw.Draw(bg)
         sz = self._tc_size_var.get() if hasattr(self, "_tc_size_var") else 64
         for gx in range(0, iw+1, sz):
-            cx2 = int(gx*scale)
-            if 0 <= cx2 <= nw:
-                draw.line([(cx2,0),(cx2,nh-1)], fill=self.palette.BORDER, width=1)
+            cx2 = int(gx*scale) - dx
+            if 0 <= cx2 < bg.width:
+                draw.line([(cx2,0),(cx2,bg.height-1)], fill=self.palette.BORDER, width=1)
         for gy in range(0, ih+1, sz):
-            cy2 = int(gy*scale)
-            if 0 <= cy2 <= nh:
-                draw.line([(0,cy2),(nw-1,cy2)], fill=self.palette.BORDER, width=1)
+            cy2 = int(gy*scale) - dy
+            if 0 <= cy2 < bg.height:
+                draw.line([(0,cy2),(bg.width-1,cy2)], fill=self.palette.BORDER, width=1)
         sw = self._tc_sel_w.get() if hasattr(self, "_tc_sel_w") else sz
         sh = self._tc_sel_h.get() if hasattr(self, "_tc_sel_h") else sz
         if iw >= sw and ih >= sh:
-            rx = int(self._tc_cx * scale)
-            ry = int(self._tc_cy * scale)
+            rx = int(self._tc_cx * scale) - dx
+            ry = int(self._tc_cy * scale) - dy
             rw = max(2, int(sw*scale))
             rh = max(2, int(sh*scale))
             draw.rectangle([rx, ry, rx+rw-1, ry+rh-1], outline="#a36b20", width=2)
             draw.rectangle([rx+2, ry+2, rx+rw-3, ry+rh-3], outline="#ffffff", width=1)
         ph = ImageTk.PhotoImage(bg)
         self._tc_src_ph = ph
-        self._canvas.create_image(self._tc_ox, self._tc_oy, anchor=tk.NW, image=ph)
+        self._canvas.create_image(self._tc_ox + dx, self._tc_oy + dy, anchor=tk.NW, image=ph)
         self._canvas.create_text(cw//2, ch-12, text="Исходное — тяните для смещения",
                                   fill=self.palette.FG2, font=("Segoe UI", 8, "italic"))
 
@@ -1261,14 +1291,14 @@ class SpriteManufacturerApp:
             text=f"Тайл {n}×{n} — видны стыки",
             fill=self.palette.FG2, font=("Segoe UI", 8, "italic"))
 
-    def _tc_checker(self, w, h, cs=8):
+    def _tc_checker(self, w, h, cs=8, offset=(0, 0)):
         img  = Image.new("RGB", (w, h))
         draw = ImageDraw.Draw(img)
-        for r in range((h+cs-1)//cs):
-            for c in range((w+cs-1)//cs):
-                col = self.palette.CHECKER_A if (r+c)%2==0 else self.palette.CHECKER_B
-                x0, y0 = c*cs, r*cs
-                draw.rectangle([x0, y0, min(x0+cs,w)-1, min(y0+cs,h)-1], fill=col)
+        ox, oy = offset
+        for y in range(-(oy % cs), h, cs):
+            for x in range(-(ox % cs), w, cs):
+                col = self.palette.CHECKER_A if ((x+ox)//cs + (y+oy)//cs)%2==0 else self.palette.CHECKER_B
+                draw.rectangle([x, y, x+cs-1, y+cs-1], fill=col)
         return img
 
     # ══════════════════════════════════════════════════════════════════
@@ -1510,7 +1540,7 @@ class SpriteManufacturerApp:
             self._auto_run()
 
     def _refine_start(self):
-        if self.src_img is None or self._refine_running:
+        if self._closing or self.src_img is None or self._refine_running:
             return
         self._auto_run()
         image = self.src_img.copy()
@@ -1530,6 +1560,8 @@ class SpriteManufacturerApp:
                 result.append((None, str(error) or type(error).__name__))
         threading.Thread(target=worker, daemon=True).start()
         def poll():
+            if self._closing:
+                return
             if not result:
                 self.root.after(80, poll)
                 return
@@ -2555,6 +2587,8 @@ class SpriteManufacturerApp:
         return pil_img.resize((nw, nh), self._resampling())
 
     def _auto_run(self):
+        if getattr(self, "_closing", False):
+            return
         if hasattr(self, "_task_preset"):
             self._sync_preset()
         if self.src_img is None:
@@ -3125,6 +3159,8 @@ class SpriteManufacturerApp:
         self._atlas_apply(sheet, n, cell_w, cell_h, cols, rows)
 
     def _atlas_update(self, *_):
+        if self._closing:
+            return
         if self.src_img is None and not getattr(self, "_atlas_imported", False):
             self._atlas_vis = None
             self._cv_draw()
@@ -3725,6 +3761,8 @@ class SpriteManufacturerApp:
 
     @file_operation
     def _resize_run(self):
+        if self._closing:
+            return
         if getattr(self, "_resize_running", False):
             return
         folder = self._resize_folder_var.get()
@@ -3786,6 +3824,8 @@ class SpriteManufacturerApp:
                 self._export_current_btn.config(state=tk.NORMAL)
 
         def step():
+            if self._closing:
+                return
             if self._resize_cancelled:
                 finish()
                 return

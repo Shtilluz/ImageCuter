@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import tempfile
+import tkinter as tk
 import unittest
 from unittest.mock import patch
 
@@ -46,7 +47,10 @@ class WorkspaceExperience(unittest.TestCase):
         self.messages = self.message_patch.start()
 
     def tearDown(self):
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
         self.message_patch.stop()
         self.config_patch.stop()
         self.directory.cleanup()
@@ -191,6 +195,40 @@ class WorkspaceExperience(unittest.TestCase):
                 self.app._preview_bg.set(backdrop)
                 self.app._cv_draw()
                 np.testing.assert_array_equal(self.app._auto_rgba_cache, expected)
+
+    def test_maximum_zoom_keeps_all_preview_buffers_inside_canvas(self):
+        self.source()
+        self.root.geometry("1000x700")
+        self.root.deiconify()
+        self.root.update()
+        resize = Image.Image.resize
+        sizes = []
+        def bounded_resize(image, size, *args, **kwargs):
+            self.assertLessEqual(size[0], self.app._canvas.winfo_width())
+            self.assertLessEqual(size[1], self.app._canvas.winfo_height())
+            sizes.append(size)
+            return resize(image, size, *args, **kwargs)
+        for tool in ("auto", "shape", "grid", "atlas", "tiletest"):
+            self.app._tool_set(tool)
+            self.root.update()
+            self.app._cv_zoom = self.app._tc_zoom = 30
+            with self.subTest(tool=tool), patch.object(Image.Image, "resize", bounded_resize):
+                self.app._cv_draw()
+        self.assertTrue(sizes)
+
+    def test_close_button_cancels_jobs_and_returns_from_mainloop(self):
+        self.source()
+        calls = []
+        self.root.after(100, lambda: calls.append("stale batch step"))
+        self.app._refine_running = self.app._resize_running = True
+        close_command = self.root.protocol("WM_DELETE_WINDOW")
+        self.root.after(0, lambda: self.root.tk.call(close_command))
+        self.root.mainloop()
+        self.assertTrue(self.app._closing)
+        self.assertFalse(self.app._refine_running or self.app._resize_running)
+        self.assertFalse(self.root.tk.call("after", "info"))
+        self.assertEqual(calls, [])
+        self.app._close()  # Repeated shutdown must be harmless.
 
     def test_brush_shortcuts_open_correct_tool_and_help_is_reusable(self):
         self.source()
