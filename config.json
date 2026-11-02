@@ -1,12 +1,13 @@
 {
     "recent_dirs": [
-        "O:/godot games/minig-bisnes/assets/tilesets",
-        "G:/gadot/survada/assets/characters",
-        "/home/bigadmin/apps/Android_apps/Aqua_Mania/AquaMania/assets/ui",
-        "/home/bigadmin/Downloads",
-        "/home/bigadmin/Pictures",
-        "/home/bigadmin/minig-bisnes/assets/sprites/vehicles/pickup",
-        "/home/bigadmin/apps/Android_apps/Aqua_Mania/priming",
-        "/home/bigadmin/apps/Android_apps/Aqua_Mania"
-    ]
+        "/home/bigadmin/apps/Android_apps/Aqua_Mania/AquaMania/assets/fish/koi",
+        "/home/bigadmin/apps/Android_apps/Aqua_Mania/AquaMania/assets/fish/firefish",
+        "/home/bigadmin/apps/Android_apps/Aqua_Mania/fish_sprites",
+        "/home/bigadmin/apps/Android_apps/Aqua_Mania/AquaMania/assets/fish/barb",
+        "/home/bigadmin/apps/Android_apps/Aqua_Mania/AquaMania/assets/fish/tiger_barb",
+        "/home/bigadmin/apps/Android_apps/Aqua_Mania/AquaMania/assets/fish/ram",
+        "/home/bigadmin/apps/Android_apps/Aqua_Mania/AquaMania/assets/fish/gourami",
+        "/home/bigadmin/Pictures/Krevetki"
+    ],
+    "theme": "light"
 }

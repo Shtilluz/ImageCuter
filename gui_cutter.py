@@ -186,6 +186,8 @@ class SpriteManufacturerApp:
         self.root.bind("<Control-0>", lambda _: self._cv_zoom_reset())
         self.root.bind("<Control-1>", lambda _: self._cv_actual_size())
         self.root.bind_all("<MouseWheel>", self._route_panel_wheel, add="+")
+        self.root.bind_all("<Button-4>", self._route_panel_wheel, add="+")
+        self.root.bind_all("<Button-5>", self._route_panel_wheel, add="+")
 
     # ══════════════════════════════════════════════════════════════════
     #  ICON / CONFIG
@@ -398,24 +400,33 @@ class SpriteManufacturerApp:
         hdr.bind("<space>", _toggle)
         return body
 
+    def _expand_section(self, title):
+        entry = self._section_toggles.get(title)
+        if entry and not entry[1][0]:
+            entry[2]()
+
     def _focus_brush(self, value):
         self._tool_set("auto")
+        self._expand_section("Больше настроек")
         body, state, toggle = self._section_toggles["Поправить кистями"]
         if not state[0]:
             toggle()
         self._mask_tool.set(value)
         self._mask_select()
         self.root.update_idletasks()
-        self._props_scroll.yview_moveto(max(0, body.winfo_y() - 45) / max(1, self._props.winfo_height()))
+        offset = body.winfo_rooty() - self._props.winfo_rooty()
+        self._props_scroll.yview_moveto(max(0, offset - 45) / max(1, self._props.winfo_height()))
         self._status_var.set("Рисуйте по детали, которую нужно вернуть. Esc — закончить." if value == "keep" else
                              "Рисуйте по лишнему фону. Esc — закончить.")
 
     def _show_advanced(self):
+        self._expand_section("Больше настроек")
         body, state, toggle = self._section_toggles["Размер и края PNG"]
         if not state[0]:
             toggle()
         self.root.update_idletasks()
-        self._props_scroll.yview_moveto(max(0, body._section_header.winfo_y() - 8) / max(1, self._props.winfo_height()))
+        offset = body._section_header.winfo_rooty() - self._props.winfo_rooty()
+        self._props_scroll.yview_moveto(max(0, offset - 8) / max(1, self._props.winfo_height()))
 
     def _apply_preset(self, _=None):
         presets = {"Несколько спрайтов на листе": ("objects", False, 12),
@@ -541,20 +552,31 @@ class SpriteManufacturerApp:
         wid = sc.create_window((0, 0), window=inner, anchor=tk.NW)
         sc.bind("<Configure>", lambda e: sc.itemconfig(wid, width=e.width))
         inner.bind("<Configure>", lambda e: sc.configure(scrollregion=sc.bbox("all")))
-        def _scroll(e):
-            if e.num == 4 or getattr(e, "delta", 0) > 0:
-                sc.yview_scroll(-1, "units")
-            else:
-                sc.yview_scroll(1, "units")
-        sc.bind("<Button-4>", _scroll)
-        sc.bind("<Button-5>", _scroll)
+        # Wheel scrolling is handled globally by _route_panel_wheel so it works
+        # over any child widget, not just the bare canvas background.
         return outer, inner
 
     def _route_panel_wheel(self, event):
+        # Normalize wheel direction across platforms: Linux delivers the wheel
+        # as Button-4/Button-5 (event.num), Windows/macOS as <MouseWheel> (event.delta).
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        elif getattr(event, "delta", 0):
+            direction = -1 if event.delta > 0 else 1
+        else:
+            return
+        props_outer = getattr(self, "_props_outer", None)
+        props_scroll = getattr(self, "_props_scroll", None)
+        tray = getattr(self, "_tray_canvas", None)
         widget = event.widget
         while widget is not None:
-            if widget == self._props_outer:
-                self._props_scroll.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            if props_outer is not None and widget is props_outer:
+                props_scroll.yview_scroll(direction, "units")
+                return "break"
+            if tray is not None and widget is tray:
+                tray.xview_scroll(direction, "units")
                 return "break"
             widget = getattr(widget, "master", None)
 
@@ -1609,7 +1631,8 @@ class SpriteManufacturerApp:
         self._quick_brush_buttons.extend((keep, remove))
         self._auto_cnt_lbl = self._lbl(p, "Найдено: 0", color=self.palette.GOLD, bold=True)
         self._auto_cnt_lbl.pack(anchor=tk.W, pady=6)
-        details = self._section(p, "Разделение и мелкие части", expanded=False)
+        advanced = self._section(p, "Больше настроек", expanded=False)
+        details = self._section(advanced, "Разделение и мелкие части", expanded=False)
         self._lbl(details, "Не брать объекты меньше, пикс:").pack(anchor=tk.W, pady=(8,0))
         self._auto_min = SoftSlider(details, from_=1, to=150, orient=tk.HORIZONTAL,
                                   bg=self.palette.BG, fg=self.palette.FG, troughcolor=self.palette.BTN, highlightthickness=0)
@@ -1623,7 +1646,7 @@ class SpriteManufacturerApp:
         self._auto_sep.set(0)
         self._auto_sep.pack(fill=tk.X)
         self._auto_sep.bind("<ButtonRelease-1>", lambda _: self._auto_run())
-        masks = self._section(p, "Поправить кистями", expanded=False)
+        masks = self._section(advanced, "Поправить кистями", expanded=False)
         row = tk.Frame(masks, bg=self.palette.BG)
         row.pack(fill=tk.X)
         for text, value in (("Обзор", "pan"), ("Оставить", "keep"), ("Удалить", "remove")):
@@ -1645,10 +1668,9 @@ class SpriteManufacturerApp:
         self._refine_btn.pack(fill=tk.X, pady=4)
         self._refine_status = self._lbl(masks, "Уточнение отделяет похожий фон по цвету и границам.", color=self.palette.FG2, size=9)
         self._refine_status.pack(anchor=tk.W)
-        self._sep(p)
-        p = self._section(p, "Размер и края PNG", expanded=False)
-        self._sprite_output_controls(p, self._auto_run)
-        self._lbl(p, "Масштаб при сохранении:", bold=True).pack(anchor=tk.W, pady=(0,4))
+        size = self._section(advanced, "Размер и края PNG", expanded=False)
+        self._sprite_output_controls(size, self._auto_run)
+        self._lbl(size, "Масштаб при сохранении:", bold=True).pack(anchor=tk.W, pady=(0,4))
         if not hasattr(self, "_auto_scale_mode"):
             self._auto_scale_mode = tk.StringVar(value="none")
             self._auto_scale_w = tk.IntVar(value=64)
@@ -1657,24 +1679,22 @@ class SpriteManufacturerApp:
                          ("По ширине", "w"),
                          ("По высоте", "h"),
                          ("По ширине и высоте", "both")]:
-            SoftRadio(p, text=txt, variable=self._auto_scale_mode, value=val,
+            SoftRadio(size, text=txt, variable=self._auto_scale_mode, value=val,
                            bg=self.palette.BG, fg=self.palette.FG, selectcolor=self.palette.BTN, activebackground=self.palette.BG,
                            command=self._auto_scale_update).pack(anchor=tk.W)
-        wf = tk.Frame(p, bg=self.palette.BG); wf.pack(fill=tk.X, pady=(4,0))
+        wf = tk.Frame(size, bg=self.palette.BG); wf.pack(fill=tk.X, pady=(4,0))
         self._lbl(wf, "Ширина:").pack(side=tk.LEFT)
         self._auto_scale_w_sb = self._spinbox(wf, self._auto_scale_w, 1, 4096, w=6)
         self._auto_scale_w_sb.pack(side=tk.LEFT, padx=4)
         self._lbl(wf, "пикс").pack(side=tk.LEFT)
-        hf = tk.Frame(p, bg=self.palette.BG); hf.pack(fill=tk.X, pady=(2,0))
+        hf = tk.Frame(size, bg=self.palette.BG); hf.pack(fill=tk.X, pady=(2,0))
         self._lbl(hf, "Высота:").pack(side=tk.LEFT)
         self._auto_scale_h_sb = self._spinbox(hf, self._auto_scale_h, 1, 4096, w=6)
         self._auto_scale_h_sb.pack(side=tk.LEFT, padx=4)
         self._lbl(hf, "пикс").pack(side=tk.LEFT)
         self._auto_scale_update()
-        self._sep(p)
-        self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
-        self._outdir_lbls["auto"] = self._lbl(p, "Папка не выбрана", color=self.palette.FG2)
-        self._outdir_lbls["auto"].pack(anchor=tk.W, pady=(3,0))
+        # Output folder lives in the fixed footer below (choose / open), so it
+        # is not duplicated inside this collapsible section.
 
         self._auto_footer = tk.Frame(self._props_outer, bg=self.palette.BG2, padx=10, pady=8,
                                      highlightthickness=1, highlightbackground=self.palette.BORDER)
