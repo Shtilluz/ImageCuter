@@ -10,6 +10,7 @@ import sys
 import base64
 import io
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -431,6 +432,7 @@ class SpriteManufacturerApp:
     def _apply_preset(self, _=None):
         presets = {"Несколько спрайтов на листе": ("objects", False, 12),
                    "Один персонаж или предмет": ("single", False, 1),
+                   "Фото товара / стекло": ("single", False, 1),
                    "Пиксель-арт: лист спрайтов": ("objects", True, 1)}
         values = presets.get(self._task_preset.get())
         if values is None:
@@ -441,6 +443,12 @@ class SpriteManufacturerApp:
         self._auto_min.set(minimum)
         self._auto_group_gap.set(0)
         self._auto_sep.set(0)
+        if self._task_preset.get() == "Фото товара / стекло":
+            self._background_mode.set("photo")
+            self._background_rgb = None
+        elif self._background_mode.get() == "photo":
+            self._background_mode.set("auto")
+        self._background_update_labels()
         self._auto_run()
 
     def _sync_preset(self):
@@ -448,6 +456,8 @@ class SpriteManufacturerApp:
         presets = {("objects", False, 12): "Несколько спрайтов на листе",
                    ("single", False, 1): "Один персонаж или предмет",
                    ("objects", True, 1): "Пиксель-арт: лист спрайтов"}
+        if self._background_mode.get() == "photo":
+            presets = {("single", False, 1): "Фото товара / стекло"}
         self._task_preset.set(presets.get(current, "Свои настройки") if not self._auto_group_gap.get() and
                               not self._auto_sep.get() else "Свои настройки")
 
@@ -483,6 +493,9 @@ class SpriteManufacturerApp:
             available = self.src_img is not None and count > 0
             self._auto_save_btn.config(text=f"Сохранить PNG · {count}" if available else "Сохранить PNG…",
                                        state=tk.NORMAL if available else tk.DISABLED)
+            overwrite_available = (available and self.src_path.lower().endswith(_IMG_EXTS)
+                                   and os.path.isfile(self.src_path))
+            self._auto_overwrite_btn.config(state=tk.NORMAL if overwrite_available else tk.DISABLED)
             self._auto_add_btn.config(state=tk.NORMAL if available else tk.DISABLED)
             self._open_export_btn.config(state=tk.NORMAL if self._last_export_dir or self.outdir else tk.DISABLED)
             self._next_step_var.set("Начните с кнопки «Открыть картинку» или перетащите файл на холст." if not image_ready else
@@ -1329,7 +1342,7 @@ class SpriteManufacturerApp:
 
     def _background_controls(self, parent, title="Фон"):
         self._lbl(parent, title, bold=True).pack(anchor=tk.W)
-        names = {"auto": "Авто", "solid": "Однотонный", "checker": "Нарисованная клеточка",
+        names = {"auto": "Авто", "photo": "Фото предмета", "solid": "Однотонный", "checker": "Нарисованная клеточка",
                  "alpha": "Без удаления фона"}
         mode = ttk.Combobox(parent, state="readonly", textvariable=self._background_mode_label,
                             values=list(names.values()), width=25)
@@ -1340,7 +1353,7 @@ class SpriteManufacturerApp:
                 self._background_rgb = None
             self._background_changed()
         mode.bind("<<ComboboxSelected>>", select)
-        self._tip(mode, "Начните с «Авто». Если фон остался, выберите его тип или укажите цвет пипеткой. «Без удаления фона» оставляет только ручную правку.")
+        self._tip(mode, "«Авто» распознаёт фото одного предмета на светлом фоне. «Фото предмета» заново выделяет цельный силуэт, в том числе у уже обработанного PNG. Для других фонов выберите тип или используйте пипетку.")
         label = self._lbl(parent, "", color=self.palette.FG2)
         label.pack(anchor=tk.W, pady=(2, 4))
         self._background_labels.append(label)
@@ -1400,10 +1413,11 @@ class SpriteManufacturerApp:
 
     def _background_update_labels(self):
         color = self._background_rgb
-        self._background_mode_label.set({"auto": "Авто", "solid": "Однотонный",
+        self._background_mode_label.set({"auto": "Авто", "photo": "Фото предмета", "solid": "Однотонный",
                                          "checker": "Нарисованная клеточка",
                                          "alpha": "Без удаления фона"}[self._background_mode.get()])
         text = ({"auto": "Авто: прозрачность, клетка или цвет",
+                 "photo": "Цельный силуэт: стекло, светлые детали, мягкие тени",
                  "solid": "Цвет фона оценивается по краям",
                  "checker": "Для регулярной клетки. Искажённый рисунок исправьте кистями.",
                  "alpha": "Исходное изображение. Фон можно убрать кистями."}[self._background_mode.get()]
@@ -1610,10 +1624,10 @@ class SpriteManufacturerApp:
                  font=("Segoe UI", 9), wraplength=286, justify=tk.LEFT, padx=8, pady=8).pack(fill=tk.X, pady=(4, 10))
         self._lbl(p, "1. Что на картинке?", bold=True).pack(anchor=tk.W)
         preset = ttk.Combobox(p, state="readonly", textvariable=self._task_preset,
-                              values=("Несколько спрайтов на листе", "Один персонаж или предмет", "Пиксель-арт: лист спрайтов"))
+                              values=("Несколько спрайтов на листе", "Один персонаж или предмет", "Фото товара / стекло", "Пиксель-арт: лист спрайтов"))
         preset.pack(fill=tk.X, pady=(4, 12))
         preset.bind("<<ComboboxSelected>>", self._apply_preset)
-        self._tip(preset, "«Один персонаж» сохранит отдельные части и частицы вместе. «Пиксель-арт» включает масштабирование без сглаживания. Ручные правки сохраняются.")
+        self._tip(preset, "«Фото товара / стекло» — для бутылок и предметов на светлом фоне: цельный силуэт без мягкой тени. «Один персонаж» сохраняет отдельные части вместе. «Пиксель-арт» сохраняет чёткие пиксели. Ручные правки сохраняются.")
         self._background_controls(p, "2. Уберите фон")
         self._lbl(p, "Чувствительность к фону:").pack(anchor=tk.W, pady=(6, 0))
         self._auto_thresh = SoftSlider(p, from_=0, to=100, orient=tk.HORIZONTAL,
@@ -1701,6 +1715,9 @@ class SpriteManufacturerApp:
         self._auto_save_btn = self._btn(self._auto_footer, "Сохранить PNG…", self._auto_save, self.palette.ACC, h=2, state=tk.DISABLED)
         self._auto_save_btn.pack(fill=tk.X, pady=(0, 4))
         self._tip(self._auto_save_btn, "Каждый найденный спрайт сохранится отдельным PNG с прозрачностью. Исходную картинку можно продолжать редактировать.")
+        self._auto_overwrite_btn = self._btn(self._auto_footer, "Перезаписать текущий", self._auto_overwrite, state=tk.DISABLED)
+        self._auto_overwrite_btn.pack(fill=tk.X, pady=(0, 4))
+        self._tip(self._auto_overwrite_btn, "Сохранить результат в последний открытый или перетащенный файл. Один объект обрезается по контуру с учётом полей и масштаба; несколько сохраняются листом. JPEG и BMP сохраняются как PNG рядом, исходник переносится в «Оригиналы».")
         secondary = tk.Frame(self._auto_footer, bg=self.palette.BG2)
         secondary.pack(fill=tk.X, pady=(0, 4))
         self._auto_add_btn = self._btn(secondary, "Добавить в нижнюю ленту", self._auto_add_to_tray, state=tk.DISABLED, font_size=9)
@@ -2338,7 +2355,8 @@ class SpriteManufacturerApp:
     def _background_signature(self, img, tolerance):
         mode = self._background_mode.get() if hasattr(self, "_background_mode") else "auto"
         return (id(img), tolerance, getattr(self, "_background_rgb", None), mode,
-                getattr(self, "_mask_revision", 0))
+                getattr(self, "_mask_revision", 0),
+                self._pixel_art.get() if hasattr(self, "_pixel_art") else False)
 
     def _extract_rgba(self, img, tolerance, process_edges=True):
         # Accept legacy threshold arguments from older integrations.
@@ -2350,7 +2368,9 @@ class SpriteManufacturerApp:
         if key == getattr(self, "_refined_key", None) and self._refined_rgba is not None:
             rgba = self._refined_rgba.copy()
         else:
-            rgba = extract_foreground(img, tolerance, getattr(self, "_background_rgb", None), mode, marks)
+            allow_photo = not (hasattr(self, "_pixel_art") and self._pixel_art.get())
+            rgba = extract_foreground(img, tolerance, getattr(self, "_background_rgb", None), mode, marks,
+                                      allow_photo=allow_photo)
         if (process_edges and hasattr(self, "_edge_smooth") and self._edge_smooth.get() and
                 not self._pixel_art.get()):
             rgba = smooth_cutout_edges(img, rgba, getattr(self, "_background_rgb", None), mode,
@@ -2673,6 +2693,62 @@ class SpriteManufacturerApp:
         if hasattr(self, "_auto_save_btn"):
             self._workflow_update()
         messagebox.showinfo("Спрайты готовы", f"Сохранено PNG: {len(contours)}\n\nПапка:\n{self.outdir}")
+
+    @file_operation
+    def _auto_overwrite(self):
+        if self.src_img is None or not self.src_path:
+            messagebox.showinfo("Нет исходного файла", "Откройте изображение, которое нужно перезаписать.")
+            return
+        source = self.src_path
+        extension = os.path.splitext(source)[1].lower()
+        if extension not in _IMG_EXTS:
+            messagebox.showinfo("Неподдерживаемый формат", "Используйте «Сохранить PNG».")
+            return
+        if not os.path.isfile(source):
+            raise FileNotFoundError(f"Исходный файл не найден:\n{source}")
+        self._auto_run()
+        if not self._auto_regions_cache:
+            messagebox.showinfo("Нет объектов", "Объекты не найдены")
+            return
+        convert_to_png = extension in (".jpg", ".jpeg", ".bmp")
+        target = os.path.splitext(source)[0] + ".png" if convert_to_png else source
+        existed = os.path.exists(target)
+        if convert_to_png and existed and not self._confirm_replace(target):
+            return
+        # Match ordinary sprite export for one subject; keep multi-sprite sheet
+        # positions. Retain the editable source so repeated saves do not shrink it.
+        image = (self._sprite_pil(self._auto_rgba_cache, self._auto_regions_cache[0], scale=True)
+                 if len(self._auto_regions_cache) == 1 else self._cv2pil(self._auto_rgba_cache))
+        if extension == ".webp":
+            self._atomic_write(target, lambda temporary: image.save(temporary, format="WEBP", lossless=True, exact=True), overwrite=existed)
+        else:
+            self._atomic_image(image, target, overwrite=existed)
+        self.src_path = target
+        self._update_src_lbl(os.path.basename(target))
+        self._last_export_dir = os.path.dirname(os.path.abspath(target))
+        self._workflow_update()
+        self._status_var.set(f"Текущий файл сохранён: {target}")
+        if convert_to_png:
+            try:
+                self._archive_original(source)
+            except OSError as error:
+                messagebox.showwarning("PNG сохранён", f"Результат сохранён:\n{target}\n\nИсходный файл не удалось перенести в «Оригиналы»:\n{source}\n{error}")
+
+    def _archive_original(self, source):
+        directory = os.path.join(os.path.dirname(source), "Оригиналы")
+        os.makedirs(directory, exist_ok=True)
+        stem, extension = os.path.splitext(os.path.basename(source))
+        index = 0
+        while True:
+            name = f"{stem}_{index}{extension}" if index else stem + extension
+            target = os.path.join(directory, name)
+            try:
+                self._atomic_write(target, lambda temporary: shutil.copy2(source, temporary))
+                break
+            except FileExistsError:
+                index += 1
+        # Delete only after both the PNG and a complete original copy exist.
+        os.unlink(source)
 
     # ══════════════════════════════════════════════════════════════════
     #  SHAPE TOOL
@@ -3586,7 +3662,7 @@ class SpriteManufacturerApp:
                     not isinstance(background_rgb, list) or len(background_rgb) != 3 or
                     any(type(c) is not int or not 0 <= c <= 255 for c in background_rgb)):
                 raise ValueError("Некорректный цвет фона")
-            choices = {"background_mode": ("auto", "solid", "checker", "alpha"),
+            choices = {"background_mode": ("auto", "photo", "solid", "checker", "alpha"),
                        "object_mode": ("objects", "single"),
                        "auto_scale_mode": ("none", "w", "h", "both")}
             for key, values in choices.items():

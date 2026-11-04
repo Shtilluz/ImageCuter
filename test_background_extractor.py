@@ -24,6 +24,75 @@ def sheet():
     return image
 
 
+def product_photo():
+    """A pale bottle with a broken highlight, a coloured label and a soft shadow."""
+    yy, xx = np.indices((480, 320))
+    shadow = 18 * np.exp(-((xx - 170) / 65) ** 2 - ((yy - 424) / 18) ** 2)
+    image = np.repeat(np.rint(250 - shadow)[:, :, None], 3, axis=2).astype(np.uint8)
+    truth = np.zeros((480, 320), np.uint8)
+    outline = np.array([(140, 40), (180, 40), (180, 135), (208, 163), (215, 185),
+                        (215, 410), (205, 424), (115, 424), (105, 410), (105, 185),
+                        (112, 163), (140, 135)])
+    cv2.fillPoly(truth, [outline], 255)
+    image[truth > 0] = (239, 242, 243)
+    cv2.polylines(image, [outline], True, (180, 199, 205), 2)
+    y, x = np.indices((105, 101))
+    image[210:315, 110:211] = np.stack((40 + x, 50 + y, 100 + ((x + 110 + y + 210) % 70)), axis=2)
+    image[45:80, 143:178] = (80, 140, 170)
+    cv2.line(image, (140, 135), (150, 126), (250, 250, 250), 3)
+    image = cv2.GaussianBlur(image, (3, 3), .5)
+    noise = np.random.default_rng(7).integers(-1, 2, image.shape)
+    return np.clip(image.astype(np.int16) + noise, 0, 255).astype(np.uint8), truth > 0
+
+
+class ProductPhotos(unittest.TestCase):
+    def test_auto_preserves_pale_silhouette_and_rejects_shadow(self):
+        image, truth = product_photo()
+        original = image.copy()
+        raw = extract_foreground(image, allow_photo=False)[:, :, 3] > 127
+        result = extract_foreground(image)
+        mask = result[:, :, 3] > 127
+        self.assertGreater(np.count_nonzero(mask & truth) / np.count_nonzero(mask | truth), .96)
+        self.assertLess(np.count_nonzero(mask & ~truth), np.count_nonzero(raw & ~truth) * .6)
+        self.assertEqual(result[370, 160, 3], 255)
+        self.assertEqual(result[10, 10, 3], 0)
+        np.testing.assert_array_equal(result[:, :, :3], image)
+        np.testing.assert_array_equal(image, original)
+
+    def test_photo_can_recover_rgb_from_previously_cut_png(self):
+        image, _ = product_photo()
+        cut = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+        cut[350:390, 140:180, 3] = 0
+        # Automatic mode continues to respect authored PNG transparency.
+        np.testing.assert_array_equal(extract_foreground(cut), cut)
+        result = extract_foreground(cut, mode="photo")
+        self.assertEqual(result[370, 160, 3], 255)
+        np.testing.assert_array_equal(result, extract_foreground(image, mode="photo"))
+
+    def test_photo_is_repeatable_and_manual_marks_override_silhouette(self):
+        image, _ = product_photo()
+        marks = np.zeros(image.shape[:2], np.uint8)
+        marks[2, 2] = 1
+        marks[370, 160] = 2
+        result = extract_foreground(image, mode="photo", marks=marks)
+        self.assertEqual(result[2, 2, 3], 255)
+        self.assertEqual(result[370, 160, 3], 0)
+        np.testing.assert_array_equal(result, extract_foreground(image, mode="photo", marks=marks))
+
+    def test_sheet_with_multiple_objects_keeps_color_keying(self):
+        image, _ = product_photo()
+        sheet_image = np.concatenate((image, image), axis=1)
+        np.testing.assert_array_equal(extract_foreground(sheet_image),
+                                      extract_foreground(sheet_image, allow_photo=False))
+
+    def test_pixel_art_disables_photo_inference(self):
+        app = SpriteManufacturerApp.__new__(SpriteManufacturerApp)
+        app.src_img = product_photo()[0]
+        app._pixel_art = SimpleNamespace(get=lambda: True)
+        np.testing.assert_array_equal(app._extract_rgba(app.src_img, 10),
+                                      extract_foreground(app.src_img, allow_photo=False))
+
+
 class BackgroundExtraction(unittest.TestCase):
     @staticmethod
     def checker(cw=8, ch=8, ox=0, oy=0):

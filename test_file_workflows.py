@@ -41,6 +41,7 @@ class FileWorkflows(unittest.TestCase):
         self.app._edge_smooth.set(True)
         self.app._edge_choke.set(0)
         self.app._export_padding.set(0)
+        self.app._auto_scale_mode.set("none")
         self.app._mask_tool.set("pan")
         self.app._background_update_labels()
         self.app._auto_thresh.set(10)
@@ -154,6 +155,211 @@ class FileWorkflows(unittest.TestCase):
         self.assertEqual(self.app.src_path, "")
         self.assertEqual(self.app.outdir, "")
         self.assertFalse(temporary.exists())
+        self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "disabled")
+        self.app._auto_overwrite()
+        self.assertFalse(temporary.exists())
+
+    def test_auto_overwrite_saves_latest_result_to_last_dropped_file_without_confirmation(self):
+        previous = self.image("previous.png", "blue")
+        original_previous = previous.read_bytes()
+        self.app._handle_drop_paths([str(previous)])
+        source = self.folder / "текущий лист.PNG"
+        pixels = np.full((64, 120, 3), 255, dtype=np.uint8)
+        pixels[16:48, 12:44] = (220, 30, 50)
+        pixels[16:48, 76:108] = (30, 60, 220)
+        Image.fromarray(pixels).save(source)
+        self.app._handle_drop_paths([str(source)])
+        self.assertEqual(self.app.src_path, str(source))
+        self.assertEqual(len(self.app._auto_regions_cache), 2)
+        original_source = self.app.src_img.copy()
+        # Save must recompute brush edits even while viewing the original.
+        self.app._mask_marks = np.zeros(pixels.shape[:2], dtype=np.uint8)
+        self.app._mask_marks[24:32, 24:32] = 2
+        self.app._mask_revision += 1
+        self.app._background_preview.set(False)
+        self.app.outdir = str(self.folder / "unrelated-output")
+        with patch("gui_cutter.filedialog") as dialogs:
+            self.app._auto_overwrite_btn.invoke()
+            dialogs.askdirectory.assert_not_called()
+            dialogs.asksaveasfilename.assert_not_called()
+        with Image.open(source) as saved:
+            self.assertEqual(saved.size, (120, 64))
+            self.assertEqual(saved.getpixel((0, 0))[3], 0)
+            self.assertEqual(saved.getpixel((28, 28))[3], 0)
+            self.assertEqual(saved.getpixel((36, 36)), (220, 30, 50, 255))
+            self.assertEqual(saved.getpixel((90, 32)), (30, 60, 220, 255))
+            np.testing.assert_array_equal(np.array(saved), np.array(self.app._cv2pil(self.app._auto_rgba_cache)))
+        self.assertEqual(previous.read_bytes(), original_previous)
+        self.assertEqual(self.app.src_path, str(source))
+        np.testing.assert_array_equal(self.app.src_img, original_source)
+        self.dialogs.askyesno.assert_not_called()
+        self.assertIn(str(source), self.app._status_var.get())
+        saved_bytes = source.read_bytes()
+        self.app._auto_overwrite_btn.invoke()
+        self.assertEqual(source.read_bytes(), saved_bytes)
+        self.assertEqual(list(self.folder.glob(".sprite-save-*")), [])
+
+    def test_auto_overwrite_button_requires_file_and_nonempty_result(self):
+        self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "disabled")
+        source = self.image("source.png")
+        self.app._load_src(str(source))
+        self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "normal")
+        self.app._clear_src()
+        self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "disabled")
+        source = self.image("empty.png", (0, 0, 0, 0))
+        original = source.read_bytes()
+        self.app._load_src(str(source))
+        self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "disabled")
+        self.app._auto_overwrite()
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_auto_overwrite_preserves_webp_format_and_alpha(self):
+        source = self.image("source.webp")
+        self.app._load_src(str(source))
+        self.app._mask_marks = np.zeros((32, 32), dtype=np.uint8)
+        self.app._mask_marks[8:12, 8:12] = 2
+        self.app._mask_revision += 1
+        self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "normal")
+        self.app._auto_overwrite_btn.invoke()
+        with Image.open(source) as saved:
+            self.assertEqual(saved.format, "WEBP")
+            self.assertEqual(saved.size, (32, 32))
+            self.assertEqual(saved.getpixel((10, 10))[3], 0)
+            expected = self.app._sprite_pil(self.app._auto_rgba_cache, self.app._auto_regions_cache[0], scale=True)
+            np.testing.assert_array_equal(np.array(saved), np.array(expected))
+
+    def test_auto_overwrite_converts_dropped_jpeg_and_bmp_and_archives_original(self):
+        previous = None
+        for extension in ("jpg", "jpeg", "JPEG", "bmp"):
+            with self.subTest(extension=extension):
+                source = self.folder / f"спрайт {extension}.{extension}"
+                pixels = np.full((64, 64, 3), 255, dtype=np.uint8)
+                pixels[16:48, 16:48] = (220, 30, 50)
+                Image.fromarray(pixels).save(source)
+                original = source.read_bytes()
+                self.app._handle_drop_paths([str(source)])
+                self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "normal")
+                original_pixels = self.app.src_img.copy()
+                self.app.outdir = str(self.folder / "unrelated-output")
+                self.app._auto_overwrite_btn.invoke()
+                target = source.with_suffix(".png")
+                archived = self.folder / "Оригиналы" / source.name
+                self.assertFalse(source.exists())
+                self.assertEqual(archived.read_bytes(), original)
+                self.assertEqual(self.app.src_path, str(target))
+                self.assertEqual(self.app._src_lbls["auto"].cget("text"), target.name)
+                np.testing.assert_array_equal(self.app.src_img, original_pixels)
+                with Image.open(target) as saved:
+                    self.assertEqual(saved.format, "PNG")
+                    self.assertLess(saved.width, 64)
+                    self.assertLess(saved.height, 64)
+                    expected = self.app._sprite_pil(self.app._auto_rgba_cache, self.app._auto_regions_cache[0], scale=True)
+                    np.testing.assert_array_equal(np.array(saved), np.array(expected))
+                saved_bytes = target.read_bytes()
+                self.app._auto_overwrite_btn.invoke()
+                self.assertEqual(target.read_bytes(), saved_bytes)
+                self.assertEqual(archived.read_bytes(), original)
+                self.dialogs.askyesno.assert_not_called()
+                if previous:
+                    self.assertEqual(previous[0].read_bytes(), previous[1])
+                previous = target, saved_bytes
+
+    def test_auto_overwrite_single_object_matches_cropped_export_with_scale_and_padding(self):
+        source = self.folder / "subject.png"
+        pixels = np.full((80, 100, 3), 255, dtype=np.uint8)
+        pixels[20:60, 30:70] = (20, 80, 150)
+        Image.fromarray(pixels).save(source)
+        self.app._handle_drop_paths([str(source)])
+        self.app._auto_scale_mode.set("both")
+        self.app._auto_scale_w.set(32)
+        self.app._auto_scale_h.set(16)
+        self.app._export_padding.set(3)
+        self.app._auto_overwrite_btn.invoke()
+        with Image.open(source) as saved:
+            self.assertEqual(saved.size, (38, 22))
+            self.assertEqual(saved.getpixel((0, 0))[3], 0)
+            self.assertEqual(saved.getpixel((19, 11)), (20, 80, 150, 255))
+        saved_bytes = source.read_bytes()
+        self.app._auto_overwrite_btn.invoke()
+        self.assertEqual(source.read_bytes(), saved_bytes)
+
+    def test_auto_overwrite_jpeg_handles_existing_png_and_original_names(self):
+        source = self.folder / "source.jpg"
+        Image.new("RGB", (32, 32), "red").save(source)
+        original = source.read_bytes()
+        target = self.image("source.png", "blue")
+        previous_png = target.read_bytes()
+        archived = self.folder / "Оригиналы" / source.name
+        archived.parent.mkdir()
+        archived.write_bytes(b"previous original")
+        self.app._handle_drop_paths([str(source)])
+        self.dialogs.askyesno.return_value = False
+        self.app._auto_overwrite_btn.invoke()
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(target.read_bytes(), previous_png)
+        self.assertEqual(self.app.src_path, str(source))
+        self.assertIn(str(target), self.dialogs.askyesno.call_args.args[1])
+        self.dialogs.askyesno.return_value = True
+        self.app._auto_overwrite_btn.invoke()
+        self.assertFalse(source.exists())
+        self.assertEqual(self.app.src_path, str(target))
+        self.assertEqual(archived.read_bytes(), b"previous original")
+        self.assertEqual(archived.with_name("source_1.jpg").read_bytes(), original)
+        with Image.open(target) as saved:
+            self.assertEqual(saved.format, "PNG")
+            self.assertGreater(saved.getpixel((16, 16))[0], 240)
+
+    def test_auto_overwrite_jpeg_write_failure_does_not_move_original(self):
+        source = self.folder / "source.jpeg"
+        Image.new("RGB", (32, 32), "red").save(source)
+        original = source.read_bytes()
+        self.app._handle_drop_paths([str(source)])
+        with patch("PIL.Image.Image.save", side_effect=OSError("disk full")):
+            self.app._auto_overwrite_btn.invoke()
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(self.app.src_path, str(source))
+        self.assertFalse(source.with_suffix(".png").exists())
+        self.assertFalse((self.folder / "Оригиналы").exists())
+        self.assertEqual(list(self.folder.glob(".sprite-save-*")), [])
+        self.dialogs.showerror.assert_called_once()
+
+    def test_auto_overwrite_jpeg_archive_failure_keeps_original_and_saved_png(self):
+        source = self.folder / "source.jpeg"
+        Image.new("RGB", (32, 32), "red").save(source)
+        original = source.read_bytes()
+        self.app._handle_drop_paths([str(source)])
+        with patch("gui_cutter.shutil.copy2", side_effect=OSError("disk full")):
+            self.app._auto_overwrite_btn.invoke()
+        self.assertEqual(source.read_bytes(), original)
+        target = source.with_suffix(".png")
+        self.assertEqual(self.app.src_path, str(target))
+        with Image.open(target) as saved:
+            self.assertEqual(saved.format, "PNG")
+        self.assertEqual(list((self.folder / "Оригиналы").iterdir()), [])
+        self.dialogs.showwarning.assert_called_once()
+        self.dialogs.showerror.assert_not_called()
+
+    def test_auto_overwrite_write_failure_preserves_source(self):
+        source = self.image("source.png")
+        original = source.read_bytes()
+        self.app._load_src(str(source))
+        status = self.app._status_var.get()
+        with patch("gui_cutter.os.replace", side_effect=PermissionError("file in use")):
+            self.app._auto_overwrite_btn.invoke()
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(list(self.folder.glob(".sprite-save-*")), [])
+        self.assertEqual(self.app._status_var.get(), status)
+        self.dialogs.showerror.assert_called_once()
+
+    def test_auto_overwrite_reports_missing_source_without_recreating_it(self):
+        source = self.image("source.png")
+        self.app._load_src(str(source))
+        source.unlink()
+        self.app._auto_overwrite()
+        self.assertFalse(source.exists())
+        self.dialogs.showerror.assert_called_once()
+        self.app._workflow_update()
+        self.assertEqual(self.app._auto_overwrite_btn.cget("state"), "disabled")
 
     def test_overwrite_without_saved_atlas_never_replaces_source(self):
         source = self.atlas()
@@ -298,6 +504,7 @@ class FileWorkflows(unittest.TestCase):
     def test_background_project_settings_roundtrip_and_legacy_threshold(self):
         self.app._load_src(str(self.image("source.png")))
         self.app._background_rgb = (40, 150, 60)
+        self.app._background_mode.set("photo")
         self.app._auto_thresh.set(23)
         self.app._atlas_thresh.set(17)
         project = self.folder / "background.smproj"
@@ -307,12 +514,14 @@ class FileWorkflows(unittest.TestCase):
         self.app._auto_thresh.set(0)
         self.assertTrue(self.app.project_load(str(project)))
         self.assertEqual(self.app._background_rgb, (40, 150, 60))
+        self.assertEqual(self.app._background_mode.get(), "photo")
         self.assertEqual(self.app._auto_thresh.get(), 23)
         self.assertEqual(self.app._atlas_thresh.get(), 17)
         project.write_text(json.dumps({"version": 3, "settings": {"atlas_thresh": 230}}))
         self.assertTrue(self.app.project_load(str(project)))
         self.assertEqual(self.app._atlas_thresh.get(), 25)
         self.assertIsNone(self.app._background_rgb)
+        self.assertEqual(self.app._background_mode.get(), "auto")
 
     def test_bad_background_color_keeps_session(self):
         source = self.image("source.png")

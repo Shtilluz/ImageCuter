@@ -83,13 +83,162 @@ def checkerboard_model(bgr, tolerance=10):
     return colors, pattern
 
 
-def extract_foreground(image, tolerance=10, background_rgb=None, mode="auto", marks=None):
+def _looks_like_product_photo(bgr, foreground, background):
+    """Conservatively opt into photo segmentation for one large, continuous-tone subject."""
+    if min(bgr.shape[:2]) < 256 or background.min() < 220 or np.ptp(background) > 18:
+        return False
+    fraction = np.mean(foreground)
+    if not .02 < fraction < .8:
+        return False
+    sample = bgr[::max(1, bgr.shape[0] // 100), ::max(1, bgr.shape[1] // 100)]
+    if len(np.unique((sample // 4).reshape(-1, 3), axis=0)) < 256:
+        return False
+    _, _, stats, _ = cv2.connectedComponentsWithStats(foreground.astype(np.uint8), connectivity=8)
+    return len(stats) > 1 and stats[1:, cv2.CC_STAT_AREA].max() >= foreground.sum() * .9
+
+
+def _refine_photo_contour(bgr, alpha, background):
+    """Snap the coarse silhouette to full-resolution edges, including pale ones.
+
+    Search only a narrow band around each contour. A cyclic dynamic program
+    favours a continuous edge with background outside it, rather than isolated
+    JPEG blocks or a stronger line inside a pale rim. Rasterize at 4x for coverage.
+    """
+    blurred = cv2.GaussianBlur(bgr.astype(np.float32), (5, 5), .8)
+    difference = _color_distance(blurred, background)
+    contours, _ = cv2.findContours((alpha > 127).astype(np.uint8), cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return alpha
+    result = np.zeros_like(alpha)
+    radius = max(6, min(24, round(max(alpha.shape) * .01)))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float32)
+    transition = .035 * (offsets[:, None] - offsets[None, :]) ** 2
+    for contour in contours:
+        raw = contour[:, 0, :].astype(np.float32)
+        if len(raw) < 20:
+            cv2.drawContours(result, [contour], -1, 255, cv2.FILLED)
+            continue
+        closed = np.vstack((raw, raw[:1]))
+        distance = np.r_[0, np.cumsum(np.linalg.norm(np.diff(closed, axis=0), axis=1))]
+        ticks = np.linspace(0, distance[-1], max(20, min(4096, round(distance[-1] / 2))), endpoint=False)
+        points = np.column_stack([np.interp(ticks, distance, closed[:, k]) for k in range(2)]).astype(np.float32)
+        tangent = np.roll(points, -3, axis=0) - np.roll(points, 3, axis=0)
+        normals = np.column_stack((-tangent[:, 1], tangent[:, 0]))
+        normals /= np.maximum(np.linalg.norm(normals, axis=1)[:, None], .001)
+        if cv2.contourArea(contour, oriented=True) > 0:
+            normals = -normals
+        coordinates = points[:, None, :] + offsets[None, :, None] * normals[:, None, :]
+        def sample(delta):
+            positions = coordinates + delta * normals[:, None, :]
+            return cv2.remap(difference, positions[:, :, 0], positions[:, :, 1], cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+        inside = np.maximum.reduce([sample(-d) for d in (1, 2, 3, 4)])
+        outside = np.mean([sample(d) for d in (2, 3, 4)], axis=0)
+        contrast = np.maximum(inside - outside, 0)
+        quality = contrast / (inside + outside + 3) * np.tanh(contrast / 3) / (1 + outside / 4)
+        score = quality - .0015 * offsets[None, :] ** 2
+        # The image boundary is a crop, not evidence of background beyond it.
+        anchored = ((points[:, 0] < 1) | (points[:, 0] > alpha.shape[1] - 2) |
+                    (points[:, 1] < 1) | (points[:, 1] > alpha.shape[0] - 2))
+        score[anchored[:, None] & (offsets[None, :] != 0)] = -1e9
+        def trace(start=None):
+            previous = score[0].copy()
+            if start is not None:
+                previous.fill(-1e9)
+                previous[start] = score[0, start]
+            back = np.zeros(score.shape, np.int16)
+            for index in range(1, len(points)):
+                paths = previous[:, None] - transition
+                back[index] = paths.argmax(axis=0)
+                previous = score[index] + paths.max(axis=0)
+            indices = np.empty(len(points), np.int32)
+            indices[-1] = np.argmax(previous if start is None else previous - transition[:, start])
+            for index in range(len(points) - 1, 0, -1):
+                indices[index - 1] = back[index, indices[index]]
+            return indices
+        chosen = trace()
+        chosen = trace(chosen[0])  # close the seam with the same smoothness cost
+        adjusted = points + offsets[chosen, None] * normals
+        adjusted = (np.roll(adjusted, 2, axis=0) + 4 * np.roll(adjusted, 1, axis=0) +
+                    6 * adjusted + 4 * np.roll(adjusted, -1, axis=0) + np.roll(adjusted, -2, axis=0)) / 16
+        adjusted[anchored] = points[anchored]
+        x0, y0 = np.maximum(0, np.floor(adjusted.min(axis=0) - 2)).astype(int)
+        x1, y1 = np.minimum(alpha.shape[::-1], np.ceil(adjusted.max(axis=0) + 3)).astype(int)
+        if x0 >= x1 or y0 >= y1:
+            continue
+        high = np.zeros(((y1 - y0) * 4, (x1 - x0) * 4), np.uint8)
+        cv2.fillPoly(high, [np.rint((adjusted - [x0, y0]) * 4).astype(np.int32)], 255)
+        coverage = cv2.resize(high, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA)
+        result[y0:y1, x0:x1] = np.maximum(result[y0:y1, x0:x1], coverage)
+    result[0], result[-1] = alpha[0], alpha[-1]
+    result[:, 0], result[:, -1] = alpha[:, 0], alpha[:, -1]
+    return result
+
+
+def extract_photo_foreground(image, tolerance=10, background_rgb=None, marks=None):
+    """Separate a photographed product by colour models and a coherent silhouette.
+
+    Work at a bounded resolution to suppress JPEG noise and broad, soft shadows.
+    Unlike colour keying, uncertain pixels on BOTH sides of the initial contour
+    may change class. Fill the silhouette to preserve pale glass and labels.
+    Explicit photo mode resegments RGB, including previously cut-out PNGs.
+    """
+    bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image[:, :, :3]
+    height, width = bgr.shape[:2]
+    scale = min(1., 768 / max(height, width))
+    small = cv2.resize(bgr, (max(1, round(width * scale)), max(1, round(height * scale))),
+                       interpolation=cv2.INTER_AREA) if scale < 1 else np.ascontiguousarray(bgr)
+    coarse = extract_foreground(small, tolerance, background_rgb, "solid", allow_photo=False)
+    visible = (coarse[:, :, 3] > 0).astype(np.uint8)
+    def fallback():
+        return extract_foreground(image, tolerance, background_rgb, "solid", marks, allow_photo=False)
+    if not visible.any() or visible.all():
+        return fallback()
+    distance = cv2.distanceTransform(visible, cv2.DIST_L2, 5)
+    color = _border_color(small) if background_rgb is None else np.asarray(background_rgb[::-1])
+    difference = _color_distance(small, color)
+    labels = np.where(visible, cv2.GC_PR_FGD, cv2.GC_PR_BGD).astype(np.uint8)
+    labels[cv2.dilate(visible, np.ones((17, 17), np.uint8)) == 0] = cv2.GC_BGD
+    labels[(distance > 8) & (difference > max(25, tolerance))] = cv2.GC_FGD
+    if marks is not None:
+        small_marks = cv2.resize(marks, small.shape[1::-1], interpolation=cv2.INTER_NEAREST)
+        labels[small_marks == 1] = cv2.GC_FGD
+        labels[small_marks == 2] = cv2.GC_BGD
+    try:
+        # K-means initialization must not change the result on repeated saves.
+        cv2.setRNGSeed(0)
+        cv2.grabCut(small, labels, None, np.zeros((1, 65), np.float64),
+                    np.zeros((1, 65), np.float64), 3, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return fallback()
+    mask = ((labels == cv2.GC_FGD) | (labels == cv2.GC_PR_FGD)).astype(np.uint8)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mask.fill(0)
+    minimum = max(4, mask.size * .00005)
+    for contour in contours:
+        if cv2.contourArea(contour) >= minimum:
+            cv2.drawContours(mask, [contour], -1, 1, cv2.FILLED)
+    radius = max(1, round(min(small.shape[:2]) * .006))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1,) * 2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    coverage = cv2.resize(mask.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
+    coverage = cv2.GaussianBlur(coverage, (3, 3), .5)
+    result = cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA)
+    result[:, :, 3] = _refine_photo_contour(bgr, np.rint(coverage * 255).astype(np.uint8), color)
+    return apply_marks(result, np.full((height, width), 255, np.uint8), marks)
+
+
+def extract_foreground(image, tolerance=10, background_rgb=None, mode="auto", marks=None, allow_photo=True):
     """Return a BGRA copy; remove matching regions reachable from any edge.
 
     Enclosed regions are kept, even when their colour matches the background.
     Existing alpha is authoritative in automatic mode. Explicit colour selection
     also allows removing a background from an image that already has alpha.
     """
+    if mode == "photo" and allow_photo:
+        return extract_photo_foreground(image, tolerance, background_rgb, marks)
     if image.ndim == 2:
         rgba = cv2.cvtColor(image, cv2.COLOR_GRAY2BGRA)
     elif image.shape[2] == 3:
@@ -129,6 +278,9 @@ def extract_foreground(image, tolerance=10, background_rgb=None, mode="auto", ma
     if background_rgb is None and mode == "auto" and model is None and background.all():
         return apply_marks(rgba, original_alpha, marks)
     rgba[background, 3] = 0
+    if (allow_photo and mode == "auto" and background_rgb is None and model is None and
+            _looks_like_product_photo(bgr, ~background, color)):
+        return extract_photo_foreground(image, tolerance, marks=marks)
     return apply_marks(rgba, original_alpha, marks)
 
 
@@ -163,7 +315,9 @@ def smooth_cutout_edges(image, rgba, background_rgb=None, mode="auto", marks=Non
                                 borderType=cv2.BORDER_REPLICATE)
     # Never grow a white fringe back into already removed background or holes.
     alpha = np.minimum(np.rint(coverage * 255).astype(np.uint8), rgba[:, :, 3])
-    band = (alpha > 0) & (alpha < rgba[:, :, 3])
+    # Photo matting already supplies partial coverage. Those pixels still have
+    # the source backdrop baked into RGB, even when smoothing leaves alpha alone.
+    band = (alpha > 0) & (alpha < 255)
     bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image[:, :, :3]
     background = None
     if mode != "alpha":
