@@ -687,6 +687,85 @@ class FileWorkflows(unittest.TestCase):
         self.assertTrue((self.folder / "output/source.png").exists())
         self.assertFalse((self.folder / "output/output").exists())
 
+    def _run_resize(self):
+        self.app._resize_run()
+        deadline = time.monotonic() + 5
+        while self.app._resize_running and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.01)
+        self.assertFalse(self.app._resize_running)
+
+    def test_batch_manual_free_width_height_preserves_names_and_alpha(self):
+        self.image("sprite.png", color=(0, 0, 0, 0), size=(40, 20))
+        self.app._resize_set_folder(str(self.folder))
+        self.app._resize_same_folder.set(False)
+        self.app.outdir = str(self.folder / "out")
+        self.app._resize_axis.set("both")
+        self.app._resize_w_var.set(200)
+        self.app._resize_h_var.set(100)
+        self._run_resize()
+        result = self.folder / "out/sprite.png"
+        self.assertTrue(result.exists())
+        with Image.open(result) as img:
+            self.assertEqual(img.size, (200, 100))
+            self.assertEqual(img.convert("RGBA").getpixel((0, 0))[3], 0)
+
+    def test_batch_manual_width_axis_keeps_aspect_ratio(self):
+        self.image("wide.png", size=(40, 20))
+        self.app._resize_set_folder(str(self.folder))
+        self.app._resize_same_folder.set(False)
+        self.app.outdir = str(self.folder / "out")
+        self.app._resize_axis.set("width")
+        self.app._resize_w_var.set(80)
+        self._run_resize()
+        with Image.open(self.folder / "out/wide.png") as img:
+            self.assertEqual(img.size, (80, 40))
+
+    def test_extract_rgba_clears_faint_residue(self):
+        self.atlas()
+        image = np.full((40, 60, 3), 255, np.uint8)
+        image[10:20, 10:20] = (30, 40, 200)
+        self.app.src_img = image
+        self.app._clean_residue.set(8)
+        rgba = np.zeros((40, 60, 4), np.uint8)
+        rgba[10:20, 10:20, 3] = 255
+        rgba[30:33, 40:43, 3] = 3   # еле заметная клякса от фона
+        with patch("gui_cutter.extract_foreground", return_value=rgba):
+            result = self.app._extract_rgba(image, 10, process_edges=False)
+        self.assertTrue(np.all(result[10:20, 10:20, 3] == 255))
+        self.assertTrue(np.all(result[30:33, 40:43, 3] == 0))
+
+    def test_atlas_auto_params_applies_preset_values(self):
+        self.atlas()
+        self.app._atlas_apply_auto_params({"tolerance": 20, "min_size": 5, "separate": 7,
+                                           "cell": 128, "cols": 3, "count": 6})
+        self.assertEqual(self.app._atlas_thresh.get(), 20)
+        self.assertEqual(self.app._atlas_min.get(), 5)
+        self.assertEqual(self.app._atlas_sep.get(), 7)
+        self.assertEqual(self.app._atlas_cell.get(), 128)
+        self.assertEqual(self.app._atlas_cols.get(), 3)
+
+    def test_atlas_auto_button_searches_and_rebuilds(self):
+        grid = np.full((120, 120, 3), 255, np.uint8)
+        for cy, cx in ((10, 10), (10, 70), (70, 10), (70, 70)):
+            grid[cy:cy+30, cx:cx+30] = (20, 30, 180)
+        grid[24:26, 40:70] = (20, 30, 180)   # 2px bridges forming a ring
+        grid[84:86, 40:70] = (20, 30, 180)
+        grid[40:70, 24:26] = (20, 30, 180)
+        grid[40:70, 84:86] = (20, 30, 180)
+        source = self.folder / "grid.png"
+        Image.fromarray(grid).save(source)
+        self.app._load_src(str(source))
+        self.app._tool_set("atlas")
+        self.app._atlas_auto_params()
+        deadline = time.time() + 60
+        while self.app._atlas_tuning and time.time() < deadline:
+            self.root.update()
+            time.sleep(0.02)
+        self.assertFalse(self.app._atlas_tuning)
+        self.assertEqual(len(self.app._atlas_raws), 4)
+        self.assertGreaterEqual(self.app._atlas_cell.get(), 30)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

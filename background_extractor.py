@@ -380,16 +380,175 @@ def refine_foreground(image, rgba, marks=None, iterations=3):
     return apply_marks(result, source[:, :, 3], marks)
 
 
-def sprite_regions(alpha, min_size=1, separate=0, group_gap=0, single=False):
+def background_difference(bgr, background_rgb=None, mode="auto", tolerance=10):
+    """Per-pixel distance to the modelled backdrop (checker, colour or border)."""
+    model = (checkerboard_model(bgr, tolerance) if mode == "checker" or
+             (mode == "auto" and background_rgb is None) else None)
+    if model is not None:
+        colors, pattern = model
+        difference = _color_distance(bgr, colors[0])
+        other = _color_distance(bgr, colors[1])
+        np.copyto(difference, other, where=pattern == 1)
+        return difference
+    color = (_border_color(bgr) if background_rgb is None
+             else np.asarray(background_rgb[::-1], dtype=np.float32))
+    return _color_distance(bgr, color)
+
+
+def cleanup_faint_residue(rgba, image=None, background_rgb=None, mode="auto",
+                          tolerance=10, floor=8, marks=None):
+    """Remove barely-visible leftovers that background removal left behind.
+
+    Drops connected components whose peak alpha stays below `floor`, stray
+    faint pixels away from visible bodies, and — when `image` is given — tiny
+    specks whose contrast to the modelled backdrop is negligible. Protected
+    brush marks and native source transparency are never touched.
+    """
+    if floor <= 0:
+        return rgba
+    result = rgba.copy()
+    alpha = result[:, :, 3]
+    protected = (marks == 1) if marks is not None else np.zeros(alpha.shape, bool)
+    positive = alpha > 0
+    if not positive.any():
+        return result
+    difference = None
+    if image is not None and mode != "alpha":
+        bgr = (cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2
+               else image[:, :, :3])
+        difference = background_difference(bgr, background_rgb, mode, tolerance)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(positive.astype(np.uint8),
+                                                               connectivity=8)
+    dropped = np.zeros(alpha.shape, bool)
+    for label in range(1, count):
+        x, y, w, h = stats[label, :4]
+        piece = labels[y:y+h, x:x+w] == label
+        window = alpha[y:y+h, x:x+w]
+        drop_piece = None
+        if int(window[piece].max()) < floor:
+            drop_piece = piece
+        elif difference is not None and w * h <= 48:
+            contrast = difference[y:y+h, x:x+w]
+            if float(contrast[piece].max()) <= tolerance + 6:
+                drop_piece = piece
+        if drop_piece is not None:
+            keep_piece = protected[y:y+h, x:x+w]
+            dropped[y:y+h, x:x+w] |= drop_piece & ~keep_piece
+    if dropped.any():
+        result[dropped, 3] = 0
+        alpha = result[:, :, 3]
+        positive = alpha > 0
+    # Faint halo pixels away from any visible body are residue too.
+    solid = (alpha >= floor) & ~protected
+    if solid.any():
+        near = cv2.dilate(solid.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+        stray = positive & ~near & ~protected
+        result[stray, 3] = 0
+    return result
+
+
+def _separation_seeds(component, radius):
+    """Seed cores for splitting touching sprites inside one connected blob.
+
+    Levels step from `radius` down to 1 px: a bulb keeps its own seed when any
+    level disconnects it from the cores already found. Small objects therefore
+    survive next to large ones even where a single global erosion would erase
+    them entirely.
+    """
+    dist = cv2.distanceTransform(component.astype(np.uint8), cv2.DIST_L2, 5)
+    seeds = np.zeros(component.shape, np.uint8)
+    top = int(min(radius, dist.max()))
+    if top < 1:
+        return seeds
+    fine_top = min(top, 24)
+    levels = list(range(top, fine_top, -max(1, (top - fine_top) // 12 or 1)))
+    levels += list(range(fine_top, 0, -1))
+    for level in levels:
+        count, labels = cv2.connectedComponents((dist >= level).astype(np.uint8),
+                                                connectivity=8)
+        for label in range(1, count):
+            cand = labels == label
+            if seeds[cand].any():
+                continue
+            seeds[cand] = 1
+    return seeds
+
+
+def _attach_leftovers(regions, binary, geometry):
+    """Give backdrop-coloured pixels (eyes, gaps) to the object that owns them.
+
+    A leftover blob that touches exactly one region is absorbed into it; one
+    wedged between several regions is a gap and stays out of every sprite.
+    """
+    index = np.zeros(binary.shape, np.int32)
+    for i, (x, y, w, h, mask) in enumerate(regions, 1):
+        index[y:y+h, x:x+w][mask.astype(bool)] = i
+    leftover = ((binary > 0) & (geometry == 0) & (index == 0)).astype(np.uint8)
+    if not leftover.any() or not regions:
+        return regions
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(leftover)
+    cents = []
+    for x, y, w, h, mask in regions:
+        ys, xs = np.nonzero(mask)
+        cents.append((float(x + xs.mean()), float(y + ys.mean())) if xs.size
+                     else (x + w / 2.0, y + h / 2.0))
+    kernel = np.ones((3, 3), np.uint8)
+    for i in range(1, count):
+        x, y, w, h = stats[i, :4]
+        piece = labels[y:y+h, x:x+w] == i
+        near = cv2.dilate(piece.astype(np.uint8), kernel).astype(bool)
+        owners = {int(o) for o in np.unique(index[y:y+h, x:x+w][near]) if o > 0}
+        if len(owners) == 1:
+            owner = owners.pop()
+        elif len(owners) > 1:
+            continue
+        else:
+            ys, xs = np.nonzero(piece)
+            cy, cx = y + ys.mean(), x + xs.mean()
+            owner = min(range(1, len(regions) + 1),
+                        key=lambda k: (cents[k - 1][0] - cx) ** 2 + (cents[k - 1][1] - cy) ** 2)
+        index[y:y+h, x:x+w][piece] = owner
+    rebuilt = []
+    for i in range(1, len(regions) + 1):
+        mask = index == i
+        points = cv2.findNonZero(mask.astype(np.uint8))
+        if points is None:
+            continue
+        bx, by, bw, bh = cv2.boundingRect(points)
+        rebuilt.append((bx, by, bw, bh, mask[by:by+bh, bx:bx+bw].copy()))
+    return rebuilt
+
+
+def sprite_regions(alpha, min_size=1, separate=0, group_gap=0, single=False,
+                   visibility=8, bulk=None):
     """Return tight (x, y, w, h, mask) regions without neighbouring sprite pixels.
 
     Morphology affects detection only. Original alpha, faint edges and thin
     details are preserved. Separation assigns pixels to the nearest surviving
     seed within each original component instead of clipping expanded rectangles.
+    Components whose peak alpha stays below `visibility` count as barely-visible
+    background residue and are dropped from detection. `bulk` (optional 0/1
+    mask) marks pixels that carry object colour: backdrop-coloured holes and
+    gaps are excluded from split geometry and later attached to their owner, so
+    grid cells on a solid background separate instead of fusing into one blob.
     """
     binary = (alpha > 0).astype(np.uint8)
     if not binary.any():
         return []
+    if visibility > 0:
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        for label in range(1, count):
+            x, y, w, h = stats[label, :4]
+            piece = labels[y:y+h, x:x+w] == label
+            if int(alpha[y:y+h, x:x+w][piece].max()) < visibility:
+                binary[y:y+h, x:x+w][piece] = 0
+        if not binary.any():
+            return []
+    geometry = binary
+    if bulk is not None:
+        hollow = binary & (np.asarray(bulk) > 0).astype(np.uint8)
+        if hollow.any():
+            geometry = hollow
     regions = []
 
     def add(mask, x=0, y=0):
@@ -405,27 +564,234 @@ def sprite_regions(alpha, min_size=1, separate=0, group_gap=0, single=False):
         return regions
     if group_gap > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (group_gap * 2 + 1,) * 2)
-        working = cv2.dilate(binary, kernel)
+        working = cv2.dilate(geometry, kernel)
     else:
-        working = binary
+        working = geometry
     count, labels, stats, _ = cv2.connectedComponentsWithStats(working, connectivity=8)
     for label in range(1, count):
         x, y, w, h = stats[label, :4]
         if w < min_size or h < min_size:
             continue
-        component = (labels[y:y+h, x:x+w] == label) & (binary[y:y+h, x:x+w] > 0)
+        component = (labels[y:y+h, x:x+w] == label) & (geometry[y:y+h, x:x+w] > 0)
         if separate <= 0 or group_gap > 0:
             add(component, int(x), int(y))
             continue
-        eroded = cv2.erode(np.pad(component.astype(np.uint8), separate),
-                           np.ones((separate * 2 + 1,) * 2, np.uint8))
-        eroded = eroded[separate:-separate, separate:-separate]
-        seed_count, _ = cv2.connectedComponents(eroded, connectivity=8)
+        seeds = _separation_seeds(component, float(separate))
+        seed_count, _ = cv2.connectedComponents(seeds, connectivity=8)
         if seed_count <= 2:
             add(component, int(x), int(y))
         else:
-            _, nearest = cv2.distanceTransformWithLabels(1 - eroded, cv2.DIST_L2, 5,
+            _, nearest = cv2.distanceTransformWithLabels(1 - seeds, cv2.DIST_L2, 5,
                                                         labelType=cv2.DIST_LABEL_CCOMP)
             for seed in range(1, seed_count):
                 add(component & (nearest == seed), int(x), int(y))
+    if geometry is not binary:
+        regions = _attach_leftovers(regions, binary, geometry)
     return sorted(regions, key=lambda r: (r[1], r[0]))
+
+
+# ══════════════════════════════════════════════════════════════════
+#  AUTOMATIC DETECTION PARAMETERS
+# ══════════════════════════════════════════════════════════════════
+
+def _junk_count(regions):
+    """Regions that look like debris rather than objects."""
+    if len(regions) < 2:
+        return 0
+    areas = sorted(max(1, int(mask.sum())) for _, _, _, _, mask in regions)
+    median = areas[len(areas) // 2]
+    largest = areas[-1]
+    junk = 0
+    for x, y, w, h, mask in regions:
+        area = max(1, int(mask.sum()))
+        fill = area / float(max(1, w * h))
+        if area < max(2, 0.05 * median) and area < 0.02 * largest:
+            junk += 1
+        elif min(w, h) <= 2 and fill < 0.12:
+            junk += 1
+    return junk
+
+
+def _adjacent_label_pairs(labels):
+    h, w = labels.shape[:2]
+    pairs = set()
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        a = labels[max(0, -dy):h - max(0, dy), max(0, -dx):w - max(0, dx)]
+        b = labels[max(0, dy):h - max(0, -dy), max(0, dx):w - max(0, -dx)]
+        touch = (a > 0) & (b > 0) & (a != b)
+        pairs.update(zip(a[touch].tolist(), b[touch].tolist()))
+    return pairs
+
+
+def _bogus_split_count(alpha, regions, split_ratio=0.45):
+    """Adjacent pieces that a neck-versus-thickness test calls one object.
+
+    A cut only counts when the connecting neck is clearly narrower than the
+    pieces it joins; halves of a starfish stay together, a tiny object on a
+    huge body still splits off.
+    """
+    if len(regions) < 2:
+        return 0
+    h, w = alpha.shape[:2]
+    labels = np.zeros((h, w), np.int32)
+    for i, (x, y, rw, rh, mask) in enumerate(regions, start=1):
+        labels[y:y+rh, x:x+rw][mask.astype(bool)] = i
+    dist = cv2.distanceTransform((labels > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    peak = np.zeros(len(regions) + 1, np.float32)
+    for i in range(1, len(regions) + 1):
+        m = labels == i
+        if m.any():
+            peak[i] = float(dist[m].max())
+    kernel = np.ones((3, 3), np.uint8)
+    bogus = 0
+    for a, b in _adjacent_label_pairs(labels):
+        ma = labels == a
+        mb = labels == b
+        near_a = cv2.dilate(ma.astype(np.uint8), kernel).astype(bool) & mb
+        near_b = cv2.dilate(mb.astype(np.uint8), kernel).astype(bool) & ma
+        saddle = 0.0
+        if near_a.any():
+            saddle = max(saddle, float(dist[near_a].max()))
+        if near_b.any():
+            saddle = max(saddle, float(dist[near_b].max()))
+        if saddle >= split_ratio * min(peak[a], peak[b]):
+            bogus += 1
+    return bogus
+
+
+def _min_size_candidates(regions, limit=4):
+    if not regions:
+        return [1, 3]
+    areas = sorted(max(1, int(mask.sum())) for _, _, _, _, mask in regions)
+    candidates = {1, 3}
+    med = areas[len(areas) // 2]
+    candidates.add(int(max(1, round(med ** 0.5 * 0.2))))
+    if len(areas) >= 4:
+        low = areas[:max(3, len(areas) * 3 // 4)]
+        best_ratio, gap_at = 1.0, None
+        for a, b in zip(low, low[1:]):
+            ratio = b / float(max(1, a))
+            if ratio > best_ratio:
+                best_ratio, gap_at = ratio, b
+        if gap_at is not None and best_ratio >= 3.0:
+            candidates.add(int(max(1, round(gap_at ** 0.5 * 0.35))))
+    return sorted(c for c in candidates if 1 <= c <= 64)[:limit]
+
+
+def tune_detection(alpha, group_gap=0, single=False, max_side=512, bulk=None):
+    """Search min_size/separate values that split `alpha` into clean objects.
+
+    The search runs on a downsampled copy and returns full-resolution values.
+    Scoring rewards real objects, penalises debris and treats a cut as bogus
+    when the neck is not clearly narrower than the pieces it joins.
+    """
+    h, w = alpha.shape[:2]
+    factor = max(1, int(np.ceil(max(h, w) / float(max_side))))
+    if factor == 1:
+        small = alpha
+        small_bulk = bulk
+    else:
+        size = (max(1, w // factor), max(1, h // factor))
+        small = cv2.resize(alpha, size, interpolation=cv2.INTER_NEAREST)
+        small_bulk = (None if bulk is None else
+                      cv2.resize(np.asarray(bulk, np.uint8), size, interpolation=cv2.INTER_NEAREST))
+    base = sprite_regions(small, 1, 0, group_gap, single, bulk=small_bulk)
+    sep_ladder = (0,) if single else (0, 1, 2, 3, 4, 6, 9, 14)
+    best = None
+    for ms in _min_size_candidates(base):
+        for sep in sep_ladder:
+            regions = sprite_regions(small, ms, sep, group_gap, single, bulk=small_bulk)
+            n = len(regions)
+            junk = _junk_count(regions)
+            bogus = _bogus_split_count(small, regions)
+            effective = n - bogus - junk
+            score = (-effective, junk, bogus, sep, ms)
+            if best is None or score < best[0]:
+                best = (score, ms, sep, n, junk)
+    if best is None:
+        return {"min_size": 3, "separate": 0, "cell": 64, "cols": 8,
+                "count": 0, "junk": 0}
+    _, ms, sep, _, junk = best
+    min_size = max(1, ms * factor)
+    separate = max(0, sep * factor)
+    regions = sprite_regions(alpha, min_size, separate, group_gap, single, bulk=bulk)
+    count = len(regions)
+    maxdim = max((max(r[2], r[3]) for r in regions), default=64)
+    cell = int(min(2048, max(16, -(-maxdim // 16) * 16)))
+    cols = max(1, int(round(count ** 0.5))) if count else 1
+    return {"min_size": min_size, "separate": separate, "cell": cell,
+            "cols": cols, "count": count, "junk": junk}
+
+
+def _tolerance_candidates(image, current, background_rgb, mode, limit=4):
+    guess = 10
+    try:
+        bgr = (cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2
+               else image[:, :, :3])
+        border = np.concatenate((bgr[0], bgr[-1], bgr[:, 0], bgr[:, -1]))
+        color = (_border_color(bgr) if background_rgb is None
+                 else np.asarray(background_rgb[::-1], dtype=np.float32))
+        distances = _color_distance(border[:, None, :], color[None, None, :])
+        flat = np.sort(distances.ravel())
+        guess = int(max(3, min(60, flat[int(len(flat) * 0.9)] + 4)))
+    except Exception:
+        pass
+    values = [current, guess]
+    if mode != "photo":
+        values += [6, 14, 28]
+    seen, out = set(), []
+    for value in values:
+        value = int(max(0, min(100, value)))
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out[:limit]
+
+
+def detection_bulk(image, background_rgb=None, mode="auto", tolerance=10, marks=None):
+    """Mask of pixels that carry object colour rather than backdrop colour.
+
+    Backdrop-coloured holes (eyes on a matching background, gaps between grid
+    cells) are excluded so object splitting sees real silhouettes. Returns None
+    when no backdrop was removed and every visible pixel counts.
+    """
+    if image is None or mode == "alpha":
+        return None
+    native_alpha = (image.ndim == 3 and image.shape[2] == 4 and
+                    bool(np.any(image[:, :, 3] < 255)))
+    if background_rgb is None and mode == "auto" and native_alpha:
+        return None
+    bgr = (cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2
+           else image[:, :, :3])
+    difference = background_difference(bgr, background_rgb, mode, tolerance)
+    bulk = (difference > max(2, tolerance // 2)).astype(np.uint8)
+    if marks is not None:
+        bulk[marks == 1] = 1
+    return bulk
+
+
+def auto_detect_params(image, tolerance=10, background_rgb=None, mode="auto",
+                       marks=None, allow_photo=True, single=False, group_gap=0):
+    """Pick background tolerance and separation so objects split cleanly.
+
+    Returns a dict with keys tolerance, min_size, separate, cell, cols, count.
+    """
+    result = {"tolerance": tolerance, "min_size": 3, "separate": 0,
+              "cell": 64, "cols": 8, "count": 0, "junk": 0}
+    best = None
+    for tol in _tolerance_candidates(image, tolerance, background_rgb, mode):
+        rgba = extract_foreground(image, tol, background_rgb, mode, marks, allow_photo)
+        rgba = cleanup_faint_residue(rgba, image, background_rgb, mode, tol, 8, marks)
+        alpha = rgba[:, :, 3]
+        if not (alpha > 0).any():
+            continue
+        bulk = detection_bulk(image, background_rgb, mode, tol, marks)
+        pick = tune_detection(alpha, group_gap=group_gap, single=single, bulk=bulk)
+        score = (-pick["count"], pick["junk"], abs(tol - tolerance), tol)
+        if best is None or score < best[0]:
+            best = (score, tol, pick)
+    if best is not None:
+        _, tol, pick = best
+        result.update(pick)
+        result["tolerance"] = tol
+    return result

@@ -272,5 +272,27 @@ class WorkspaceExperience(unittest.TestCase):
         self.assertEqual(self.app.excluded, {1})
 
 
+class WatchdogProcess(unittest.TestCase):
+    """The hang watchdog must exit quietly when the target is already gone."""
+
+    SCRIPT = Path(__file__).parent / "hang_watchdog.py"
+
+    def run_watchdog(self, *args):
+        import subprocess
+        import sys
+        return subprocess.run([sys.executable, str(self.SCRIPT), *args],
+                              capture_output=True, timeout=30)
+
+    def test_watchdog_exits_promptly_when_target_is_gone(self):
+        proc = self.run_watchdog("--pid", "99999999",
+                                 "--beat", str(Path(tempfile.gettempdir()) / "sm_missing_beat"),
+                                 "--timeout", "0.2")
+        self.assertEqual(proc.returncode, 0)
+
+    def test_watchdog_requires_pid_and_beat(self):
+        proc = self.run_watchdog()
+        self.assertEqual(proc.returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
