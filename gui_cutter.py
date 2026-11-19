@@ -430,7 +430,8 @@ class SpriteManufacturerApp:
         self._auto_min.set(minimum)
         self._auto_group_gap.set(0)
         self._auto_sep.set(0)
-        self._auto_run()
+        if self._auto_started():
+            self._auto_run()
 
     def _sync_preset(self):
         current = (self._auto_object_mode.get(), self._pixel_art.get(), self._auto_min.get())
@@ -474,9 +475,16 @@ class SpriteManufacturerApp:
                                        state=tk.NORMAL if available else tk.DISABLED)
             self._auto_add_btn.config(state=tk.NORMAL if available else tk.DISABLED)
             self._open_export_btn.config(state=tk.NORMAL if self._last_export_dir or self.outdir else tk.DISABLED)
-            self._next_step_var.set("Начните с кнопки «Открыть картинку» или перетащите файл на холст." if not image_ready else
-                                    f"Найдено: {count}. Проверьте края и сохраните PNG." if available else
-                                    "Спрайты не найдены. Проверьте тип фона и минимальный размер объектов.")
+            if hasattr(self, "_auto_bg_btn"):
+                self._auto_bg_btn.config(state=tk.NORMAL if self.src_img is not None else tk.DISABLED)
+            if self.src_img is None:
+                self._next_step_var.set("Начните с кнопки «Открыть картинку» или перетащите файл на холст.")
+            elif not self._auto_started():
+                self._next_step_var.set("Картинка открыта. Нажмите «Убрать фон», чтобы скрыть фон и найти спрайты.")
+            elif available:
+                self._next_step_var.set(f"Найдено: {count}. Проверьте края и сохраните PNG.")
+            else:
+                self._next_step_var.set("Спрайты не найдены. Проверьте тип фона и минимальный размер объектов.")
             folder = self._last_export_dir or self.outdir
             short = folder if len(folder) < 49 else "…" + folder[-46:]
             self._export_folder_var.set(f"Папка: {short}" if folder else "При сохранении выберите папку для PNG")
@@ -512,8 +520,8 @@ class SpriteManufacturerApp:
         tk.Label(content, text="Из картинки — в игровой спрайт", bg=self.palette.BG, fg=self.palette.FG,
                  font=("Segoe UI", 16, "bold"), anchor=tk.W).pack(anchor=tk.W, pady=(0, 14))
         entries = (
-            ("1. Откройте картинку", "PNG, JPEG или WebP из вашего генератора. Можно перетащить файл в окно или вставить его через Ctrl+V."),
-            ("2. Проверьте фон и края", "Обычно достаточно режима «Авто». Сравните «Оригинал» и «Результат». Клетчатая подложка означает прозрачность."),
+            ("1. Откройте картинку", "PNG, JPEG или WebP из вашего генератора. Можно перетащить файл в окно или вставить его через Ctrl+V. Картинка откроется как есть, без изменений."),
+            ("2. Нажмите «Убрать фон»", "Кнопка в разделе «2. Уберите фон». Обычно достаточно режима «Авто». Сравните «Оригинал» и «Результат». Клетчатая подложка означает прозрачность."),
             ("3. Сохраните PNG", "Кнопка справа сохраняет каждый найденный спрайт в отдельный файл. Чтобы собрать набор из разных картинок, добавляйте их в нижнюю ленту."),
             ("Если что-то пошло не так", "Пропала деталь → «Вернуть деталь». Остался фон → «Стереть фон». Персонаж разбился на части → выберите «Один персонаж или предмет». Искажённую клеточку поправьте кистями."),
             ("Проект или PNG?", "PNG — готовая картинка для игры. Проект .smproj — исходник и ваши правки, чтобы продолжить работу позже. Проект сохраняется через меню «Файл» или Ctrl+S."),
@@ -660,7 +668,7 @@ class SpriteManufacturerApp:
         tk.Label(self._welcome_panel, text="Спрайты из ИИ-картинки", bg=self.palette.CANVAS, fg=self.palette.FG,
                  font=("Segoe UI", 18, "bold")).pack(pady=(0, 12))
         self._welcome_copy = tk.Label(self._welcome_panel,
-            text="Перетащите сюда картинку из генератора.\nПрограмма поможет убрать фон, отделить объекты\nи сохранить прозрачные PNG для игры.",
+            text="Перетащите сюда картинку из генератора.\nНажмите «Убрать фон», отделите объекты\nи сохраните прозрачные PNG для игры.",
             bg=self.palette.CANVAS, fg=self.palette.FG2, font=("Segoe UI", 10), wraplength=400, justify=tk.CENTER)
         self._welcome_copy.pack(pady=(0, 16))
         welcome_actions = tk.Frame(self._welcome_panel, bg=self.palette.CANVAS)
@@ -845,7 +853,7 @@ class SpriteManufacturerApp:
         self._rebind_canvas(name)
         self._props_scroll.yview_moveto(0)
         hints = {
-            "auto": "Сравните оригинал и результат. Светлый или тёмный фон просмотра помогает проверить края.",
+            "auto": "Нажмите «Убрать фон», затем сравните оригинал и результат. Светлая или тёмная подложка помогает проверить края.",
             "shape": "Тяните для выделения • ПКМ — завершить контур • Esc — отменить текущий контур",
             "grid": "Задайте размер тайла или число ячеек, затем добавьте результат в спрайты",
             "atlas": "Клик — исключить ячейку • Перетаскивание — изменить порядок",
@@ -885,7 +893,10 @@ class SpriteManufacturerApp:
         if self.tool in self._outdir_lbls:
             self._outdir_lbls[self.tool].config(text=self.outdir or "Папка не выбрана")
         if self.tool == "auto":
-            self._auto_run()
+            if self._auto_started():
+                self._auto_run()
+            else:
+                self._cv_draw()
         elif self.tool == "grid":
             self._grid_update()
         elif self.tool == "atlas" and (self.src_img is not None or getattr(self, "_atlas_imported", False)):
@@ -1038,7 +1049,8 @@ class SpriteManufacturerApp:
             self._cv_draw_source()
         self._workflow_update()
         if self.tool == "auto":
-            self._view_title.config(text="Результат извлечения" if self.src_img is not None and self._background_preview.get()
+            self._view_title.config(text="Результат извлечения" if self.src_img is not None and self._auto_started()
+                                    and self._background_preview.get()
                                     and not self._background_picking else "Исходная картинка")
         image = (None if self.tool == "resize" else
                  self._atlas_vis if self.tool == "atlas" else self._cv2pil(self.src_img))
@@ -1429,7 +1441,7 @@ class SpriteManufacturerApp:
         self._mask_tool.set("pan")
         self._mask_last = None
         self._rebind_canvas(self.tool)
-        if self.tool == "auto":
+        if self.tool == "auto" and self._auto_started():
             self._auto_run()
         self._sh_reset()
 
@@ -1593,6 +1605,9 @@ class SpriteManufacturerApp:
         preset.bind("<<ComboboxSelected>>", self._apply_preset)
         self._tip(preset, "«Один персонаж» сохранит отдельные части и частицы вместе. «Пиксель-арт» включает масштабирование без сглаживания. Ручные правки сохраняются.")
         self._background_controls(p, "2. Уберите фон")
+        self._auto_bg_btn = self._btn(p, "Убрать фон", self._auto_run, self.palette.ACC, h=2, state=tk.DISABLED)
+        self._auto_bg_btn.pack(fill=tk.X, pady=(4, 6))
+        self._tip(self._auto_bg_btn, "Фон не убирается сам при открытии картинки. Нажмите — программа скроет фон и покажет найденные спрайты.")
         self._lbl(p, "Чувствительность к фону:").pack(anchor=tk.W, pady=(6, 0))
         self._auto_thresh = SoftSlider(p, from_=0, to=100, orient=tk.HORIZONTAL,
                                      bg=self.palette.BG, fg=self.palette.FG, troughcolor=self.palette.BTN, highlightthickness=0)
@@ -2086,9 +2101,7 @@ class SpriteManufacturerApp:
         self._update_src_lbl("Из буфера" if from_clipboard else os.path.basename(path))
         self._update_outdir_lbl(self.outdir)
         self._status_var.set(f"Открыто: {os.path.basename(path)}  ({img.shape[1]}×{img.shape[0]})")
-        if self.tool == "auto":
-            self._auto_run()
-        elif self.tool == "grid":
+        if self.tool == "grid":
             self._grid_update()
         elif self.tool == "atlas":
             self._atlas_update()
@@ -2585,6 +2598,9 @@ class SpriteManufacturerApp:
         else:
             nw, nh = sw, sh
         return pil_img.resize((nw, nh), self._resampling())
+
+    def _auto_started(self):
+        return getattr(self, "_auto_rgba_cache", None) is not None
 
     def _auto_run(self):
         if getattr(self, "_closing", False):
@@ -3668,6 +3684,8 @@ class SpriteManufacturerApp:
             self._atlas_update()
         saved_tool = data.get("tool", "atlas")
         self._tool_set(saved_tool if isinstance(saved_tool, str) and saved_tool in self._panels else "atlas")
+        if self.src_img is not None and self.tool == "auto":
+            self._auto_run()
         self._atlas_last_out = data.get("last_out") or None
         self._atlas_overwrite_btn.config(state=tk.NORMAL if self._atlas_last_out else tk.DISABLED)
         self._atlas_target_lbl.config(text=f"Файл для перезаписи:\n{os.path.abspath(self._atlas_last_out)}"

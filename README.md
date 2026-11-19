@@ -29,8 +29,8 @@
 
 ### Быстрый старт
 
-1. Нажмите **«Открыть картинку…»**, перетащите файл на холст или вставьте его через **Ctrl+V**. Поддерживаются PNG, JPEG, WebP и BMP.
-2. Выберите, что на картинке: **несколько спрайтов**, **один персонаж или предмет**, **пиксель-арт**. Начните с фона **«Авто»**.
+1. Нажмите **«Открыть картинку…»**, перетащите файл на холст или вставьте его через **Ctrl+V**. Поддерживаются PNG, JPEG, WebP и BMP. Картинка открывается как есть — без обработки.
+2. Выберите, что на картинке: **несколько спрайтов**, **один персонаж или предмет**, **пиксель-арт**. Затем нажмите **«Убрать фон»** — он не запускается сам при открытии. Начните с фона **«Авто»**.
 3. Переключайте **«Оригинал / Результат»**, чтобы проверить выделение. Подложки **«Клетка / Светлый / Тёмный»** помогают увидеть края и прозрачность; на сохранённую картинку они не влияют.
 4. Если нужно, нажмите **«Вернуть деталь»** или **«Стереть фон»** и поправьте результат кистью. **Esc** завершает рисование и возвращает просмотр.
 5. Выберите папку и нажмите **«Сохранить PNG»**. Кнопка справа остаётся видимой при прокрутке настроек. Каждый найденный спрайт сохраняется отдельным файлом.
@@ -123,8 +123,8 @@ The main workflow is **open artwork → remove the background → inspect → sa
 
 ### Quick start
 
-1. Open or drop an image, or paste it with **Ctrl+V**. PNG, JPEG, WebP and BMP are supported.
-2. Choose a task: multiple sprites, a single character/object, or pixel art. Start with automatic background detection.
+1. Open or drop an image, or paste it with **Ctrl+V**. PNG, JPEG, WebP and BMP are supported. The image opens unchanged.
+2. Choose a task: multiple sprites, a single character/object, or pixel art. Then press **Remove background** — it never runs on its own when a file is opened. Start with automatic background detection.
 3. Compare the original and result. Checker, light and dark preview backgrounds help inspect transparent edges without changing the exported image.
 4. Restore missing details or erase remaining background with the brushes. **Esc** returns to viewing.
 5. Choose an output folder and save PNGs using the pinned action on the right.

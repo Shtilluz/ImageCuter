@@ -478,6 +478,26 @@ class FileWorkflows(unittest.TestCase):
         self.assertTrue((self.folder / "output/source.png").exists())
         self.assertFalse((self.folder / "output/output").exists())
 
+    def test_dropped_image_keeps_background_until_remove_button_pressed(self):
+        path = self.folder / "sheet.jpg"
+        sheet = Image.new("RGB", (80, 80), "white")
+        block = Image.new("RGB", (16, 16), (200, 40, 40))
+        sheet.paste(block, (4, 4))
+        sheet.paste(block, (60, 60))
+        sheet.save(path, quality=95)
+        self.app._handle_drop_paths([str(path)])
+        self.assertTrue(self.app.src_img is not None)
+        self.assertIsNone(self.app._auto_rgba_cache)
+        self.assertEqual(self.app._auto_contours_cache, [])
+        self.assertEqual(self.app._auto_save_btn.cget("state"), "disabled")
+        self.assertEqual(self.app._auto_bg_btn.cget("state"), "normal")
+        self.assertIn("Убрать фон", self.app._next_step_var.get())
+        self.app._auto_bg_btn.invoke()
+        self.assertIsNotNone(self.app._auto_rgba_cache)
+        self.assertTrue(self.app._auto_regions_cache)
+        self.assertEqual(self.app._auto_save_btn.cget("state"), "normal")
+        self.assertIn("Найдено: 2", self.app._next_step_var.get())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
