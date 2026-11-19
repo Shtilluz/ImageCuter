@@ -9,7 +9,11 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from background_extractor import bleed_transparent_colors, extract_foreground, checkerboard_model, refine_foreground, smooth_cutout_edges, sprite_regions
+from background_extractor import (auto_detect_params, bleed_transparent_colors,
+                                  cleanup_faint_residue, detection_bulk,
+                                  extract_foreground, checkerboard_model,
+                                  refine_foreground, smooth_cutout_edges,
+                                  sprite_regions, tune_detection)
 from gui_cutter import SpriteManufacturerApp
 
 
@@ -22,6 +26,75 @@ def sheet():
     image[20:30, 20:30] = BACKGROUND[::-1]  # exterior notch
     image[35:45, 35:45] = BACKGROUND[::-1]  # enclosed same-colour detail
     return image
+
+
+def product_photo():
+    """A pale bottle with a broken highlight, a coloured label and a soft shadow."""
+    yy, xx = np.indices((480, 320))
+    shadow = 18 * np.exp(-((xx - 170) / 65) ** 2 - ((yy - 424) / 18) ** 2)
+    image = np.repeat(np.rint(250 - shadow)[:, :, None], 3, axis=2).astype(np.uint8)
+    truth = np.zeros((480, 320), np.uint8)
+    outline = np.array([(140, 40), (180, 40), (180, 135), (208, 163), (215, 185),
+                        (215, 410), (205, 424), (115, 424), (105, 410), (105, 185),
+                        (112, 163), (140, 135)])
+    cv2.fillPoly(truth, [outline], 255)
+    image[truth > 0] = (239, 242, 243)
+    cv2.polylines(image, [outline], True, (180, 199, 205), 2)
+    y, x = np.indices((105, 101))
+    image[210:315, 110:211] = np.stack((40 + x, 50 + y, 100 + ((x + 110 + y + 210) % 70)), axis=2)
+    image[45:80, 143:178] = (80, 140, 170)
+    cv2.line(image, (140, 135), (150, 126), (250, 250, 250), 3)
+    image = cv2.GaussianBlur(image, (3, 3), .5)
+    noise = np.random.default_rng(7).integers(-1, 2, image.shape)
+    return np.clip(image.astype(np.int16) + noise, 0, 255).astype(np.uint8), truth > 0
+
+
+class ProductPhotos(unittest.TestCase):
+    def test_auto_preserves_pale_silhouette_and_rejects_shadow(self):
+        image, truth = product_photo()
+        original = image.copy()
+        raw = extract_foreground(image, allow_photo=False)[:, :, 3] > 127
+        result = extract_foreground(image)
+        mask = result[:, :, 3] > 127
+        self.assertGreater(np.count_nonzero(mask & truth) / np.count_nonzero(mask | truth), .96)
+        self.assertLess(np.count_nonzero(mask & ~truth), np.count_nonzero(raw & ~truth) * .6)
+        self.assertEqual(result[370, 160, 3], 255)
+        self.assertEqual(result[10, 10, 3], 0)
+        np.testing.assert_array_equal(result[:, :, :3], image)
+        np.testing.assert_array_equal(image, original)
+
+    def test_photo_can_recover_rgb_from_previously_cut_png(self):
+        image, _ = product_photo()
+        cut = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+        cut[350:390, 140:180, 3] = 0
+        # Automatic mode continues to respect authored PNG transparency.
+        np.testing.assert_array_equal(extract_foreground(cut), cut)
+        result = extract_foreground(cut, mode="photo")
+        self.assertEqual(result[370, 160, 3], 255)
+        np.testing.assert_array_equal(result, extract_foreground(image, mode="photo"))
+
+    def test_photo_is_repeatable_and_manual_marks_override_silhouette(self):
+        image, _ = product_photo()
+        marks = np.zeros(image.shape[:2], np.uint8)
+        marks[2, 2] = 1
+        marks[370, 160] = 2
+        result = extract_foreground(image, mode="photo", marks=marks)
+        self.assertEqual(result[2, 2, 3], 255)
+        self.assertEqual(result[370, 160, 3], 0)
+        np.testing.assert_array_equal(result, extract_foreground(image, mode="photo", marks=marks))
+
+    def test_sheet_with_multiple_objects_keeps_color_keying(self):
+        image, _ = product_photo()
+        sheet_image = np.concatenate((image, image), axis=1)
+        np.testing.assert_array_equal(extract_foreground(sheet_image),
+                                      extract_foreground(sheet_image, allow_photo=False))
+
+    def test_pixel_art_disables_photo_inference(self):
+        app = SpriteManufacturerApp.__new__(SpriteManufacturerApp)
+        app.src_img = product_photo()[0]
+        app._pixel_art = SimpleNamespace(get=lambda: True)
+        np.testing.assert_array_equal(app._extract_rgba(app.src_img, 10),
+                                      extract_foreground(app.src_img, allow_photo=False))
 
 
 class BackgroundExtraction(unittest.TestCase):
@@ -329,6 +402,110 @@ class ExtractionWorkflows(unittest.TestCase):
             reconstructed[y:y+h, x:x+w] += mask.astype(np.uint8)
         np.testing.assert_array_equal(reconstructed, alpha > 0)
 
+    def test_mixed_scale_objects_split_at_narrow_neck(self):
+        # Small disk r=5 next to a big disk r=18, joined by a 4px neck: the
+        # small one must survive even where one global erosion would erase it.
+        alpha = np.zeros((80, 120), np.uint8)
+        cv2.circle(alpha, (35, 40), 18, 255, -1)
+        cv2.circle(alpha, (88, 40), 5, 255, -1)
+        alpha[38:42, 53:83] = 255  # neck
+        regions = sprite_regions(alpha, min_size=3, separate=8)
+        self.assertEqual(len(regions), 2)
+        sizes = sorted(int(mask.sum()) for _, _, _, _, mask in regions)
+        self.assertLess(sizes[0], 0.3 * sizes[1])
+
+    def test_wide_neck_dumbbell_stays_one_region(self):
+        alpha = np.zeros((48, 88), np.uint8)
+        alpha[8:32, 8:32] = 255
+        alpha[8:32, 56:80] = 255
+        alpha[19:29, 32:56] = 255  # 10px-wide bar: clearly one object
+        regions = sprite_regions(alpha, min_size=3, separate=3)
+        self.assertEqual(len(regions), 1)
+
+    def test_cleanup_faint_residue_removes_ghosts_and_keeps_bodies(self):
+        rgba = np.zeros((60, 60, 4), np.uint8)
+        rgba[2:12, 2:12, 3] = 255          # solid body
+        rgba[7, 12, 3] = 2                 # faint tail touching the body
+        rgba[20:25, 20:25, 3] = 3          # detached ghost patch
+        rgba[45, 45, 3] = 4                # stray faint pixel
+        cleaned = cleanup_faint_residue(rgba, floor=8)
+        self.assertTrue(np.all(cleaned[2:12, 2:12, 3] == 255))
+        self.assertEqual(cleaned[7, 12, 3], 2)
+        self.assertEqual(cleaned[22, 22, 3], 0)
+        self.assertEqual(cleaned[45, 45, 3], 0)
+
+    def test_cleanup_removes_low_contrast_specks(self):
+        image = np.full((40, 60, 3), 255, np.uint8)
+        image[5:15, 5:15] = (30, 40, 200)   # real sprite, high contrast
+        image[30:32, 40:42] = (250, 250, 250)  # opaque ghost speck
+        rgba = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+        rgba[:, :, 3] = 0
+        rgba[5:15, 5:15, 3] = 255
+        rgba[30:32, 40:42, 3] = 255
+        cleaned = cleanup_faint_residue(rgba, image, tolerance=10, floor=8)
+        self.assertTrue(np.all(cleaned[5:15, 5:15, 3] == 255))
+        self.assertTrue(np.all(cleaned[30:32, 40:42, 3] == 0))
+
+    def test_cleanup_never_touches_protected_marks(self):
+        rgba = np.zeros((30, 30, 4), np.uint8)
+        rgba[10:12, 10:12, 3] = 3
+        marks = np.zeros((30, 30), np.uint8)
+        marks[10, 10] = 1
+        cleaned = cleanup_faint_residue(rgba, floor=8, marks=marks)
+        self.assertEqual(cleaned[10, 10, 3], 3)
+        self.assertEqual(cleaned[11, 11, 3], 0)
+
+    def test_bulk_mask_splits_grid_with_enclosed_background_gaps(self):
+        # Four squares on white joined by 2px bridges: the white gaps are
+        # enclosed, so extraction keeps them opaque and the ring fuses into one
+        # blob. With the bulk mask the silhouettes stay separate.
+        image = np.full((120, 120, 3), 255, np.uint8)
+        for cy, cx in ((10, 10), (10, 70), (70, 10), (70, 70)):
+            image[cy:cy+30, cx:cx+30] = (20, 30, 180)
+        image[24:26, 40:70] = (20, 30, 180)
+        image[84:86, 40:70] = (20, 30, 180)
+        image[40:70, 24:26] = (20, 30, 180)
+        image[40:70, 84:86] = (20, 30, 180)
+        bgr = image[:, :, ::-1].copy()
+        rgba = extract_foreground(bgr, 10)
+        alpha = rgba[:, :, 3]
+        # Even separation cannot split the ring: the enclosed white gaps fill
+        # the middle, so the necks read as one thick body without the bulk mask.
+        self.assertEqual(len(sprite_regions(alpha, 3, 2)), 1)
+        bulk = detection_bulk(bgr, tolerance=10)
+        regions = sprite_regions(alpha, 3, 2, bulk=bulk)
+        self.assertEqual(len(regions), 4)
+        for x, y, w, h, mask in regions:
+            self.assertLessEqual(max(w, h), 50)   # square plus half a bridge
+            self.assertGreater(int(mask.sum()), 800)
+
+    def test_tune_detection_splits_touching_grid(self):
+        alpha = np.zeros((80, 80), np.uint8)
+        for cy, cx in ((10, 10), (10, 50), (50, 10), (50, 50)):
+            alpha[cy:cy+16, cx:cx+16] = 255
+        # 2px bridges between neighbours (a ring of four squares)
+        alpha[17:19, 26:51] = 255
+        alpha[57:59, 26:51] = 255
+        alpha[26:51, 17:19] = 255
+        alpha[26:51, 57:59] = 255
+        alpha[0, 0] = 255   # noise speck
+        alpha[79, 2] = 255  # noise speck
+        pick = tune_detection(alpha)
+        self.assertEqual(pick["count"], 4)
+        self.assertGreaterEqual(pick["separate"], 1)
+        self.assertGreaterEqual(pick["min_size"], 2)
+
+    def test_auto_detect_params_prefers_clean_split(self):
+        image = np.full((120, 160, 3), 255, np.uint8)
+        for cy, cx in ((20, 30), (20, 100), (75, 30), (75, 100)):
+            image[cy:cy+22, cx:cx+22] = (20, 30, 180)
+            image[cy+8:cy+14, cx+8:cx+14] = (255, 255, 255)  # enclosed hole
+        image[29:31, 52:100] = (20, 30, 180)   # 2px bridge between top squares
+        image[55:57, 70:72] = (250, 250, 250)  # ghost speck
+        pick = auto_detect_params(image, tolerance=10)
+        self.assertEqual(pick["count"], 4)
+        self.assertGreaterEqual(pick["cell"], 22)
+
     def test_grouping_retains_small_detached_parts(self):
         alpha = np.zeros((50, 70), np.uint8)
         alpha[10:30, 10:30] = 255
@@ -339,13 +516,13 @@ class ExtractionWorkflows(unittest.TestCase):
         self.assertEqual(regions[0][:4], (10, 10, 26, 20))
         self.assertEqual(sum(int(r[4].sum()) for r in regions), np.count_nonzero(alpha))
 
-    def test_single_object_keeps_detached_faint_particles(self):
+    def test_single_object_drops_detached_faint_particles(self):
         alpha = np.zeros((50, 70), np.uint8)
         alpha[10:30, 10:30] = 255
         alpha[40, 60] = 1
         regions = sprite_regions(alpha, min_size=12, single=True)
         self.assertEqual(len(regions), 1)
-        self.assertEqual(regions[0][:4], (10, 10, 51, 31))
+        self.assertEqual(regions[0][:4], (10, 10, 20, 20))
 
     def test_padding_does_not_multiply_partial_alpha(self):
         rgba = cv2.cvtColor(sheet(), cv2.COLOR_BGR2BGRA)

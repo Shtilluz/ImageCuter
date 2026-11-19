@@ -143,8 +143,16 @@ class WorkspaceExperience(unittest.TestCase):
         self.app._apply_preset()
         self.assertEqual(self.app._auto_object_mode.get(), "single")
         np.testing.assert_array_equal(self.app._mask_marks, marks)
+        self.app._task_preset.set("Фото товара / стекло")
+        self.app._apply_preset()
+        self.assertEqual(self.app._background_mode.get(), "photo")
+        self.assertEqual(self.app._background_mode_label.get(), "Фото предмета")
+        self.assertEqual(self.app._task_preset.get(), "Фото товара / стекло")
+        self.assertEqual(self.app._auto_object_mode.get(), "single")
+        np.testing.assert_array_equal(self.app._mask_marks, marks)
         self.app._task_preset.set("Пиксель-арт: лист спрайтов")
         self.app._apply_preset()
+        self.assertEqual(self.app._background_mode.get(), "auto")
         self.assertTrue(self.app._pixel_art.get())
         self.assertEqual(self.app._auto_min.get(), 1)
         self.app._auto_group_gap.set(4)
@@ -180,10 +188,11 @@ class WorkspaceExperience(unittest.TestCase):
         self.app._focus_brush("remove")
         self.app._props_scroll.yview_moveto(1)
         self.root.update()
-        self.assertTrue(self.app._auto_save_btn.winfo_ismapped())
-        y = self.app._auto_save_btn.winfo_rooty()
-        self.assertGreaterEqual(y, self.root.winfo_rooty())
-        self.assertLess(y + self.app._auto_save_btn.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
+        for button in (self.app._auto_save_btn, self.app._auto_overwrite_btn):
+            self.assertTrue(button.winfo_ismapped())
+            y = button.winfo_rooty()
+            self.assertGreaterEqual(y, self.root.winfo_rooty())
+            self.assertLess(y + button.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
         self.assertEqual(self.app._mask_tool.get(), "remove")
 
     def test_comparison_and_preview_background_do_not_change_extracted_pixels(self):
@@ -261,6 +270,28 @@ class WorkspaceExperience(unittest.TestCase):
         self.assertIsNotNone(self.app._atlas_sheet)
         self.app._tool_set("auto")
         self.assertEqual(self.app.excluded, {1})
+
+
+class WatchdogProcess(unittest.TestCase):
+    """The hang watchdog must exit quietly when the target is already gone."""
+
+    SCRIPT = Path(__file__).parent / "hang_watchdog.py"
+
+    def run_watchdog(self, *args):
+        import subprocess
+        import sys
+        return subprocess.run([sys.executable, str(self.SCRIPT), *args],
+                              capture_output=True, timeout=30)
+
+    def test_watchdog_exits_promptly_when_target_is_gone(self):
+        proc = self.run_watchdog("--pid", "99999999",
+                                 "--beat", str(Path(tempfile.gettempdir()) / "sm_missing_beat"),
+                                 "--timeout", "0.2")
+        self.assertEqual(proc.returncode, 0)
+
+    def test_watchdog_requires_pid_and_beat(self):
+        proc = self.run_watchdog()
+        self.assertEqual(proc.returncode, 2)
 
 
 if __name__ == "__main__":

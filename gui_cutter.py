@@ -1,5 +1,5 @@
 """
-Sprite Manufacturer v3 — Unified Workspace
+Sprite Manufacturer v3.1 — Unified Workspace
 Автор: Shtillgor (https://midgro.uz/)
 """
 
@@ -10,6 +10,7 @@ import sys
 import base64
 import io
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -21,7 +22,10 @@ from PIL import Image, ImageTk, ImageDraw
 from ui_widgets import SoftButton, SoftCheck, SoftRadio, SoftSlider, ToolTip
 from ui_themes import THEMES, THEME_NAMES, palette, translate_color
 from tkinterdnd2 import TkinterDnD, DND_FILES
-from background_extractor import bleed_transparent_colors, extract_foreground, refine_foreground, smooth_cutout_edges, sprite_regions
+from background_extractor import (auto_detect_params, bleed_transparent_colors,
+                                  cleanup_faint_residue, detection_bulk,
+                                  extract_foreground, refine_foreground,
+                                  smooth_cutout_edges, sprite_regions)
 from canvas_preview import resize_region, viewport_region
 
 CONFIG_FILE = os.path.join(os.path.dirname(sys.executable if getattr(sys, "frozen", False)
@@ -66,7 +70,7 @@ class SpriteManufacturerApp:
         self._last_export_dir = ""
         self._preview_bg = tk.StringVar(value="Клетка")
         self._task_preset = tk.StringVar(value="Несколько спрайтов на листе")
-        self.root.title("Sprite Manufacturer v3")
+        self.root.title("Sprite Manufacturer v3.1")
         self.root.geometry("1300x860")
         self.root.minsize(1000, 700)
         self.root.configure(bg=self.palette.BG)
@@ -117,6 +121,9 @@ class SpriteManufacturerApp:
         self._refined_rgba = None
         self._refined_key = None
         self._refine_running = False
+        self._watchdog_proc = None
+        self._watchdog_dir = None
+        self._watchdog_beat_path = None
         self._auto_object_mode = tk.StringVar(value="objects")
         self._auto_group_gap = tk.IntVar(value=0)
         self._pixel_art = tk.BooleanVar(value=False)
@@ -124,6 +131,7 @@ class SpriteManufacturerApp:
         self._edge_bleed = tk.BooleanVar(value=True)
         self._edge_smooth = tk.BooleanVar(value=True)
         self._edge_choke = tk.IntVar(value=0)
+        self._clean_residue = tk.IntVar(value=8)
 
         # Canvas zoom/pan
         self._cv_zoom    = 1.0
@@ -144,6 +152,8 @@ class SpriteManufacturerApp:
         self._atlas_sheet   = None
         self._atlas_last_out = None
         self._atlas_removed  = 0
+        self._atlas_tuning   = False
+        self._atlas_batch    = False
         self._tray_photos    = []
 
         # Shape state
@@ -186,6 +196,8 @@ class SpriteManufacturerApp:
         self.root.bind("<Control-0>", lambda _: self._cv_zoom_reset())
         self.root.bind("<Control-1>", lambda _: self._cv_actual_size())
         self.root.bind_all("<MouseWheel>", self._route_panel_wheel, add="+")
+        self.root.bind_all("<Button-4>", self._route_panel_wheel, add="+")
+        self.root.bind_all("<Button-5>", self._route_panel_wheel, add="+")
 
     # ══════════════════════════════════════════════════════════════════
     #  ICON / CONFIG
@@ -197,6 +209,7 @@ class SpriteManufacturerApp:
         self._closing = True
         self._resize_cancelled = True
         self._resize_running = self._refine_running = False
+        self._watchdog_stop()
         for tip in self._tooltips:
             tip.hide()
         # Cancel timers before widget destruction (refinement polling, batch
@@ -398,28 +411,38 @@ class SpriteManufacturerApp:
         hdr.bind("<space>", _toggle)
         return body
 
+    def _expand_section(self, title):
+        entry = self._section_toggles.get(title)
+        if entry and not entry[1][0]:
+            entry[2]()
+
     def _focus_brush(self, value):
         self._tool_set("auto")
+        self._expand_section("Больше настроек")
         body, state, toggle = self._section_toggles["Поправить кистями"]
         if not state[0]:
             toggle()
         self._mask_tool.set(value)
         self._mask_select()
         self.root.update_idletasks()
-        self._props_scroll.yview_moveto(max(0, body.winfo_y() - 45) / max(1, self._props.winfo_height()))
+        offset = body.winfo_rooty() - self._props.winfo_rooty()
+        self._props_scroll.yview_moveto(max(0, offset - 45) / max(1, self._props.winfo_height()))
         self._status_var.set("Рисуйте по детали, которую нужно вернуть. Esc — закончить." if value == "keep" else
                              "Рисуйте по лишнему фону. Esc — закончить.")
 
     def _show_advanced(self):
+        self._expand_section("Больше настроек")
         body, state, toggle = self._section_toggles["Размер и края PNG"]
         if not state[0]:
             toggle()
         self.root.update_idletasks()
-        self._props_scroll.yview_moveto(max(0, body._section_header.winfo_y() - 8) / max(1, self._props.winfo_height()))
+        offset = body._section_header.winfo_rooty() - self._props.winfo_rooty()
+        self._props_scroll.yview_moveto(max(0, offset - 8) / max(1, self._props.winfo_height()))
 
     def _apply_preset(self, _=None):
         presets = {"Несколько спрайтов на листе": ("objects", False, 12),
                    "Один персонаж или предмет": ("single", False, 1),
+                   "Фото товара / стекло": ("single", False, 1),
                    "Пиксель-арт: лист спрайтов": ("objects", True, 1)}
         values = presets.get(self._task_preset.get())
         if values is None:
@@ -430,6 +453,12 @@ class SpriteManufacturerApp:
         self._auto_min.set(minimum)
         self._auto_group_gap.set(0)
         self._auto_sep.set(0)
+        if self._task_preset.get() == "Фото товара / стекло":
+            self._background_mode.set("photo")
+            self._background_rgb = None
+        elif self._background_mode.get() == "photo":
+            self._background_mode.set("auto")
+        self._background_update_labels()
         if self._auto_started():
             self._auto_run()
 
@@ -438,6 +467,8 @@ class SpriteManufacturerApp:
         presets = {("objects", False, 12): "Несколько спрайтов на листе",
                    ("single", False, 1): "Один персонаж или предмет",
                    ("objects", True, 1): "Пиксель-арт: лист спрайтов"}
+        if self._background_mode.get() == "photo":
+            presets = {("single", False, 1): "Фото товара / стекло"}
         self._task_preset.set(presets.get(current, "Свои настройки") if not self._auto_group_gap.get() and
                               not self._auto_sep.get() else "Свои настройки")
 
@@ -473,6 +504,9 @@ class SpriteManufacturerApp:
             available = self.src_img is not None and count > 0
             self._auto_save_btn.config(text=f"Сохранить PNG · {count}" if available else "Сохранить PNG…",
                                        state=tk.NORMAL if available else tk.DISABLED)
+            overwrite_available = (available and self.src_path.lower().endswith(_IMG_EXTS)
+                                   and os.path.isfile(self.src_path))
+            self._auto_overwrite_btn.config(state=tk.NORMAL if overwrite_available else tk.DISABLED)
             self._auto_add_btn.config(state=tk.NORMAL if available else tk.DISABLED)
             self._open_export_btn.config(state=tk.NORMAL if self._last_export_dir or self.outdir else tk.DISABLED)
             if hasattr(self, "_auto_bg_btn"):
@@ -549,20 +583,31 @@ class SpriteManufacturerApp:
         wid = sc.create_window((0, 0), window=inner, anchor=tk.NW)
         sc.bind("<Configure>", lambda e: sc.itemconfig(wid, width=e.width))
         inner.bind("<Configure>", lambda e: sc.configure(scrollregion=sc.bbox("all")))
-        def _scroll(e):
-            if e.num == 4 or getattr(e, "delta", 0) > 0:
-                sc.yview_scroll(-1, "units")
-            else:
-                sc.yview_scroll(1, "units")
-        sc.bind("<Button-4>", _scroll)
-        sc.bind("<Button-5>", _scroll)
+        # Wheel scrolling is handled globally by _route_panel_wheel so it works
+        # over any child widget, not just the bare canvas background.
         return outer, inner
 
     def _route_panel_wheel(self, event):
+        # Normalize wheel direction across platforms: Linux delivers the wheel
+        # as Button-4/Button-5 (event.num), Windows/macOS as <MouseWheel> (event.delta).
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        elif getattr(event, "delta", 0):
+            direction = -1 if event.delta > 0 else 1
+        else:
+            return
+        props_outer = getattr(self, "_props_outer", None)
+        props_scroll = getattr(self, "_props_scroll", None)
+        tray = getattr(self, "_tray_canvas", None)
         widget = event.widget
         while widget is not None:
-            if widget == self._props_outer:
-                self._props_scroll.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            if props_outer is not None and widget is props_outer:
+                props_scroll.yview_scroll(direction, "units")
+                return "break"
+            if tray is not None and widget is tray:
+                tray.xview_scroll(direction, "units")
                 return "break"
             widget = getattr(widget, "master", None)
 
@@ -1319,7 +1364,7 @@ class SpriteManufacturerApp:
 
     def _background_controls(self, parent, title="Фон"):
         self._lbl(parent, title, bold=True).pack(anchor=tk.W)
-        names = {"auto": "Авто", "solid": "Однотонный", "checker": "Нарисованная клеточка",
+        names = {"auto": "Авто", "photo": "Фото предмета", "solid": "Однотонный", "checker": "Нарисованная клеточка",
                  "alpha": "Без удаления фона"}
         mode = ttk.Combobox(parent, state="readonly", textvariable=self._background_mode_label,
                             values=list(names.values()), width=25)
@@ -1330,7 +1375,7 @@ class SpriteManufacturerApp:
                 self._background_rgb = None
             self._background_changed()
         mode.bind("<<ComboboxSelected>>", select)
-        self._tip(mode, "Начните с «Авто». Если фон остался, выберите его тип или укажите цвет пипеткой. «Без удаления фона» оставляет только ручную правку.")
+        self._tip(mode, "«Авто» распознаёт фото одного предмета на светлом фоне. «Фото предмета» заново выделяет цельный силуэт, в том числе у уже обработанного PNG. Для других фонов выберите тип или используйте пипетку.")
         label = self._lbl(parent, "", color=self.palette.FG2)
         label.pack(anchor=tk.W, pady=(2, 4))
         self._background_labels.append(label)
@@ -1378,6 +1423,12 @@ class SpriteManufacturerApp:
         SoftCheck(parent, text="Пиксель-арт: чёткие пиксели", variable=self._pixel_art,
                   bg=self.palette.BG, fg=self.palette.FG, command=callback).pack(anchor=tk.W, pady=3)
         self._edge_controls(parent, callback)
+        row = tk.Frame(parent, bg=self.palette.BG)
+        row.pack(fill=tk.X, pady=(6, 0))
+        self._lbl(row, "Убрать еле заметные следы, alpha <", size=9).pack(side=tk.LEFT)
+        editor = self._spinbox(row, self._clean_residue, 0, 64, cmd=callback)
+        editor.pack(side=tk.LEFT, padx=4)
+        self._tip(editor, "Фон удалён, но остались почти невидимые пиксели и мусор? Значение N обнуляет пиксели прозрачностью ниже N и мелкие низкоконтрастные кляксы. 0 — не чистить. Кисть «Оставить» защищает отмеченные пиксели.")
         SoftCheck(parent, text="Цвет краёв в прозрачных полях", variable=self._edge_bleed,
                   bg=self.palette.BG, fg=self.palette.FG, command=callback).pack(anchor=tk.W, pady=3)
         row = tk.Frame(parent, bg=self.palette.BG)
@@ -1390,10 +1441,11 @@ class SpriteManufacturerApp:
 
     def _background_update_labels(self):
         color = self._background_rgb
-        self._background_mode_label.set({"auto": "Авто", "solid": "Однотонный",
+        self._background_mode_label.set({"auto": "Авто", "photo": "Фото предмета", "solid": "Однотонный",
                                          "checker": "Нарисованная клеточка",
                                          "alpha": "Без удаления фона"}[self._background_mode.get()])
         text = ({"auto": "Авто: прозрачность, клетка или цвет",
+                 "photo": "Цельный силуэт: стекло, светлые детали, мягкие тени",
                  "solid": "Цвет фона оценивается по краям",
                  "checker": "Для регулярной клетки. Искажённый рисунок исправьте кистями.",
                  "alpha": "Исходное изображение. Фон можно убрать кистями."}[self._background_mode.get()]
@@ -1600,10 +1652,10 @@ class SpriteManufacturerApp:
                  font=("Segoe UI", 9), wraplength=286, justify=tk.LEFT, padx=8, pady=8).pack(fill=tk.X, pady=(4, 10))
         self._lbl(p, "1. Что на картинке?", bold=True).pack(anchor=tk.W)
         preset = ttk.Combobox(p, state="readonly", textvariable=self._task_preset,
-                              values=("Несколько спрайтов на листе", "Один персонаж или предмет", "Пиксель-арт: лист спрайтов"))
+                              values=("Несколько спрайтов на листе", "Один персонаж или предмет", "Фото товара / стекло", "Пиксель-арт: лист спрайтов"))
         preset.pack(fill=tk.X, pady=(4, 12))
         preset.bind("<<ComboboxSelected>>", self._apply_preset)
-        self._tip(preset, "«Один персонаж» сохранит отдельные части и частицы вместе. «Пиксель-арт» включает масштабирование без сглаживания. Ручные правки сохраняются.")
+        self._tip(preset, "«Фото товара / стекло» — для бутылок и предметов на светлом фоне: цельный силуэт без мягкой тени. «Один персонаж» сохраняет отдельные части вместе. «Пиксель-арт» сохраняет чёткие пиксели. Ручные правки сохраняются.")
         self._background_controls(p, "2. Уберите фон")
         self._auto_bg_btn = self._btn(p, "Убрать фон", self._auto_run, self.palette.ACC, h=2, state=tk.DISABLED)
         self._auto_bg_btn.pack(fill=tk.X, pady=(4, 6))
@@ -1624,7 +1676,8 @@ class SpriteManufacturerApp:
         self._quick_brush_buttons.extend((keep, remove))
         self._auto_cnt_lbl = self._lbl(p, "Найдено: 0", color=self.palette.GOLD, bold=True)
         self._auto_cnt_lbl.pack(anchor=tk.W, pady=6)
-        details = self._section(p, "Разделение и мелкие части", expanded=False)
+        advanced = self._section(p, "Больше настроек", expanded=False)
+        details = self._section(advanced, "Разделение и мелкие части", expanded=False)
         self._lbl(details, "Не брать объекты меньше, пикс:").pack(anchor=tk.W, pady=(8,0))
         self._auto_min = SoftSlider(details, from_=1, to=150, orient=tk.HORIZONTAL,
                                   bg=self.palette.BG, fg=self.palette.FG, troughcolor=self.palette.BTN, highlightthickness=0)
@@ -1638,7 +1691,7 @@ class SpriteManufacturerApp:
         self._auto_sep.set(0)
         self._auto_sep.pack(fill=tk.X)
         self._auto_sep.bind("<ButtonRelease-1>", lambda _: self._auto_run())
-        masks = self._section(p, "Поправить кистями", expanded=False)
+        masks = self._section(advanced, "Поправить кистями", expanded=False)
         row = tk.Frame(masks, bg=self.palette.BG)
         row.pack(fill=tk.X)
         for text, value in (("Обзор", "pan"), ("Оставить", "keep"), ("Удалить", "remove")):
@@ -1660,10 +1713,9 @@ class SpriteManufacturerApp:
         self._refine_btn.pack(fill=tk.X, pady=4)
         self._refine_status = self._lbl(masks, "Уточнение отделяет похожий фон по цвету и границам.", color=self.palette.FG2, size=9)
         self._refine_status.pack(anchor=tk.W)
-        self._sep(p)
-        p = self._section(p, "Размер и края PNG", expanded=False)
-        self._sprite_output_controls(p, self._auto_run)
-        self._lbl(p, "Масштаб при сохранении:", bold=True).pack(anchor=tk.W, pady=(0,4))
+        size = self._section(advanced, "Размер и края PNG", expanded=False)
+        self._sprite_output_controls(size, self._auto_run)
+        self._lbl(size, "Масштаб при сохранении:", bold=True).pack(anchor=tk.W, pady=(0,4))
         if not hasattr(self, "_auto_scale_mode"):
             self._auto_scale_mode = tk.StringVar(value="none")
             self._auto_scale_w = tk.IntVar(value=64)
@@ -1672,30 +1724,31 @@ class SpriteManufacturerApp:
                          ("По ширине", "w"),
                          ("По высоте", "h"),
                          ("По ширине и высоте", "both")]:
-            SoftRadio(p, text=txt, variable=self._auto_scale_mode, value=val,
+            SoftRadio(size, text=txt, variable=self._auto_scale_mode, value=val,
                            bg=self.palette.BG, fg=self.palette.FG, selectcolor=self.palette.BTN, activebackground=self.palette.BG,
                            command=self._auto_scale_update).pack(anchor=tk.W)
-        wf = tk.Frame(p, bg=self.palette.BG); wf.pack(fill=tk.X, pady=(4,0))
+        wf = tk.Frame(size, bg=self.palette.BG); wf.pack(fill=tk.X, pady=(4,0))
         self._lbl(wf, "Ширина:").pack(side=tk.LEFT)
         self._auto_scale_w_sb = self._spinbox(wf, self._auto_scale_w, 1, 4096, w=6)
         self._auto_scale_w_sb.pack(side=tk.LEFT, padx=4)
         self._lbl(wf, "пикс").pack(side=tk.LEFT)
-        hf = tk.Frame(p, bg=self.palette.BG); hf.pack(fill=tk.X, pady=(2,0))
+        hf = tk.Frame(size, bg=self.palette.BG); hf.pack(fill=tk.X, pady=(2,0))
         self._lbl(hf, "Высота:").pack(side=tk.LEFT)
         self._auto_scale_h_sb = self._spinbox(hf, self._auto_scale_h, 1, 4096, w=6)
         self._auto_scale_h_sb.pack(side=tk.LEFT, padx=4)
         self._lbl(hf, "пикс").pack(side=tk.LEFT)
         self._auto_scale_update()
-        self._sep(p)
-        self._btn(p, "Выбрать папку вывода", self._menu_choose_outdir).pack(fill=tk.X)
-        self._outdir_lbls["auto"] = self._lbl(p, "Папка не выбрана", color=self.palette.FG2)
-        self._outdir_lbls["auto"].pack(anchor=tk.W, pady=(3,0))
+        # Output folder lives in the fixed footer below (choose / open), so it
+        # is not duplicated inside this collapsible section.
 
         self._auto_footer = tk.Frame(self._props_outer, bg=self.palette.BG2, padx=10, pady=8,
                                      highlightthickness=1, highlightbackground=self.palette.BORDER)
         self._auto_save_btn = self._btn(self._auto_footer, "Сохранить PNG…", self._auto_save, self.palette.ACC, h=2, state=tk.DISABLED)
         self._auto_save_btn.pack(fill=tk.X, pady=(0, 4))
         self._tip(self._auto_save_btn, "Каждый найденный спрайт сохранится отдельным PNG с прозрачностью. Исходную картинку можно продолжать редактировать.")
+        self._auto_overwrite_btn = self._btn(self._auto_footer, "Перезаписать текущий", self._auto_overwrite, state=tk.DISABLED)
+        self._auto_overwrite_btn.pack(fill=tk.X, pady=(0, 4))
+        self._tip(self._auto_overwrite_btn, "Сохранить результат в последний открытый или перетащенный файл. Один объект обрезается по контуру с учётом полей и масштаба; несколько сохраняются листом. JPEG и BMP сохраняются как PNG рядом, исходник переносится в «Оригиналы».")
         secondary = tk.Frame(self._auto_footer, bg=self.palette.BG2)
         secondary.pack(fill=tk.X, pady=(0, 4))
         self._auto_add_btn = self._btn(secondary, "Добавить в нижнюю ленту", self._auto_add_to_tray, state=tk.DISABLED, font_size=9)
@@ -1809,6 +1862,10 @@ class SpriteManufacturerApp:
         self._source_controls(p, "atlas")
 
         s2 = self._section(p, "Поиск объектов", expanded=False)
+        auto_row = tk.Frame(s2, bg=self.palette.BG); auto_row.pack(fill=tk.X, pady=(0, 6))
+        self._atlas_auto_btn = self._btn(auto_row, "⚡ Авто-подбор параметров", self._atlas_auto_params)
+        self._atlas_auto_btn.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self._tip(self._atlas_auto_btn, "Сам подбирает допуск фона, минимальный размер, разделение и размер ячейки так, чтобы объекты разделились на отдельные спрайты — в том числе слипшиеся и разного размера. Можно доработать ползунками после подбора.")
         self._background_controls(s2)
         self._sprite_options(s2, self._atlas_update)
         self._sprite_output_controls(s2, self._atlas_update)
@@ -2331,7 +2388,8 @@ class SpriteManufacturerApp:
     def _background_signature(self, img, tolerance):
         mode = self._background_mode.get() if hasattr(self, "_background_mode") else "auto"
         return (id(img), tolerance, getattr(self, "_background_rgb", None), mode,
-                getattr(self, "_mask_revision", 0))
+                getattr(self, "_mask_revision", 0),
+                self._pixel_art.get() if hasattr(self, "_pixel_art") else False)
 
     def _extract_rgba(self, img, tolerance, process_edges=True):
         # Accept legacy threshold arguments from older integrations.
@@ -2343,17 +2401,33 @@ class SpriteManufacturerApp:
         if key == getattr(self, "_refined_key", None) and self._refined_rgba is not None:
             rgba = self._refined_rgba.copy()
         else:
-            rgba = extract_foreground(img, tolerance, getattr(self, "_background_rgb", None), mode, marks)
+            allow_photo = not (hasattr(self, "_pixel_art") and self._pixel_art.get())
+            rgba = extract_foreground(img, tolerance, getattr(self, "_background_rgb", None), mode, marks,
+                                      allow_photo=allow_photo)
+        floor = self._clean_residue.get() if hasattr(self, "_clean_residue") else 0
+        native_alpha = img.ndim == 3 and img.shape[2] == 4 and bool(np.any(img[:, :, 3] < 255))
+        removed_bg = not (mode == "alpha" or
+                          (getattr(self, "_background_rgb", None) is None and mode == "auto" and native_alpha))
+        if floor > 0 and removed_bg:
+            rgba = cleanup_faint_residue(rgba, img, getattr(self, "_background_rgb", None), mode,
+                                         tolerance, floor, marks)
         if (process_edges and hasattr(self, "_edge_smooth") and self._edge_smooth.get() and
                 not self._pixel_art.get()):
             rgba = smooth_cutout_edges(img, rgba, getattr(self, "_background_rgb", None), mode,
                                        marks, self._edge_choke.get(), tolerance)
         return rgba
 
-    def _detection_regions(self, alpha, ms, sep=0):
+    def _detection_bulk_for(self, img, tolerance):
+        if img is None:
+            return None
+        mode = self._background_mode.get() if hasattr(self, "_background_mode") else "auto"
+        marks = getattr(self, "_mask_marks", None) if img is self.src_img else None
+        return detection_bulk(img, getattr(self, "_background_rgb", None), mode, tolerance, marks)
+
+    def _detection_regions(self, alpha, ms, sep=0, bulk=None):
         single = hasattr(self, "_auto_object_mode") and self._auto_object_mode.get() == "single"
         gap = self._auto_group_gap.get() if hasattr(self, "_auto_group_gap") else 0
-        return sprite_regions(alpha, ms, sep, gap, single)
+        return sprite_regions(alpha, ms, sep, gap, single, bulk=bulk)
 
     @staticmethod
     def _region_contour(region):
@@ -2379,7 +2453,8 @@ class SpriteManufacturerApp:
     def _auto_contours(self, img, tv, ms, sep=0, mask=None):
         if img is None: return []
         alpha = self._extract_rgba(img, tv)[:, :, 3] if mask is None else mask
-        return [self._region_contour(r) for r in self._detection_regions(alpha, ms, sep)]
+        bulk = None if mask is not None else self._detection_bulk_for(img, tv)
+        return [self._region_contour(r) for r in self._detection_regions(alpha, ms, sep, bulk)]
 
     def _dedup_raws(self, raws, thresh):
         SIZE = 32
@@ -2670,6 +2745,62 @@ class SpriteManufacturerApp:
             self._workflow_update()
         messagebox.showinfo("Спрайты готовы", f"Сохранено PNG: {len(contours)}\n\nПапка:\n{self.outdir}")
 
+    @file_operation
+    def _auto_overwrite(self):
+        if self.src_img is None or not self.src_path:
+            messagebox.showinfo("Нет исходного файла", "Откройте изображение, которое нужно перезаписать.")
+            return
+        source = self.src_path
+        extension = os.path.splitext(source)[1].lower()
+        if extension not in _IMG_EXTS:
+            messagebox.showinfo("Неподдерживаемый формат", "Используйте «Сохранить PNG».")
+            return
+        if not os.path.isfile(source):
+            raise FileNotFoundError(f"Исходный файл не найден:\n{source}")
+        self._auto_run()
+        if not self._auto_regions_cache:
+            messagebox.showinfo("Нет объектов", "Объекты не найдены")
+            return
+        convert_to_png = extension in (".jpg", ".jpeg", ".bmp")
+        target = os.path.splitext(source)[0] + ".png" if convert_to_png else source
+        existed = os.path.exists(target)
+        if convert_to_png and existed and not self._confirm_replace(target):
+            return
+        # Match ordinary sprite export for one subject; keep multi-sprite sheet
+        # positions. Retain the editable source so repeated saves do not shrink it.
+        image = (self._sprite_pil(self._auto_rgba_cache, self._auto_regions_cache[0], scale=True)
+                 if len(self._auto_regions_cache) == 1 else self._cv2pil(self._auto_rgba_cache))
+        if extension == ".webp":
+            self._atomic_write(target, lambda temporary: image.save(temporary, format="WEBP", lossless=True, exact=True), overwrite=existed)
+        else:
+            self._atomic_image(image, target, overwrite=existed)
+        self.src_path = target
+        self._update_src_lbl(os.path.basename(target))
+        self._last_export_dir = os.path.dirname(os.path.abspath(target))
+        self._workflow_update()
+        self._status_var.set(f"Текущий файл сохранён: {target}")
+        if convert_to_png:
+            try:
+                self._archive_original(source)
+            except OSError as error:
+                messagebox.showwarning("PNG сохранён", f"Результат сохранён:\n{target}\n\nИсходный файл не удалось перенести в «Оригиналы»:\n{source}\n{error}")
+
+    def _archive_original(self, source):
+        directory = os.path.join(os.path.dirname(source), "Оригиналы")
+        os.makedirs(directory, exist_ok=True)
+        stem, extension = os.path.splitext(os.path.basename(source))
+        index = 0
+        while True:
+            name = f"{stem}_{index}{extension}" if index else stem + extension
+            target = os.path.join(directory, name)
+            try:
+                self._atomic_write(target, lambda temporary: shutil.copy2(source, temporary))
+                break
+            except FileExistsError:
+                index += 1
+        # Delete only after both the PNG and a complete original copy exist.
+        os.unlink(source)
+
     # ══════════════════════════════════════════════════════════════════
     #  SHAPE TOOL
     # ══════════════════════════════════════════════════════════════════
@@ -2955,7 +3086,8 @@ class SpriteManufacturerApp:
         ms  = self._atlas_min.get()    if hasattr(self, "_atlas_min")    else 12
         sep = max(0, self._atlas_sep.get() if hasattr(self, "_atlas_sep") else 0)
         rgba = self._extract_rgba(img, tv)
-        regions = self._detection_regions(rgba[:, :, 3], ms, sep)
+        regions = self._detection_regions(rgba[:, :, 3], ms, sep,
+                                          self._detection_bulk_for(img, tv))
         if not regions:
             self._atlas_raws = []
             return []
@@ -3175,7 +3307,7 @@ class SpriteManufacturerApp:
         self._atlas_apply(sheet, n, cell_w, cell_h, cols, rows)
 
     def _atlas_update(self, *_):
-        if self._closing:
+        if self._closing or getattr(self, "_atlas_batch", False):
             return
         if self.src_img is None and not getattr(self, "_atlas_imported", False):
             self._atlas_vis = None
@@ -3274,6 +3406,68 @@ class SpriteManufacturerApp:
         if hasattr(self, "_atlas_noup_chk"):
             self._atlas_noup_chk.config(state=state)
         self._atlas_update()
+
+    def _atlas_auto_params(self):
+        if self._closing or self._atlas_tuning:
+            return
+        if self.src_img is None:
+            messagebox.showinfo("Нет изображения", "Сначала откройте изображение")
+            return
+        img = self.src_img.copy()
+        bg = getattr(self, "_background_rgb", None)
+        mode = self._background_mode.get() if hasattr(self, "_background_mode") else "auto"
+        marks = self._mask_marks.copy() if self._mask_marks is not None else None
+        allow_photo = not (hasattr(self, "_pixel_art") and self._pixel_art.get())
+        single = (hasattr(self, "_auto_object_mode") and self._auto_object_mode.get() == "single")
+        gap = self._auto_group_gap.get() if hasattr(self, "_auto_group_gap") else 0
+        current = self._atlas_thresh.get() if hasattr(self, "_atlas_thresh") else 10
+        self._atlas_tuning = True
+        if hasattr(self, "_atlas_auto_btn"):
+            self._atlas_auto_btn.config(state=tk.DISABLED)
+        self._status_var.set("Подбираю параметры поиска объектов…")
+        result = []
+
+        def worker():
+            try:
+                pick = auto_detect_params(img, tolerance=current, background_rgb=bg,
+                                          mode=mode, marks=marks, allow_photo=allow_photo,
+                                          single=single, group_gap=gap)
+                result.append((pick, None))
+            except Exception as error:
+                result.append((None, str(error) or type(error).__name__))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll():
+            if self._closing:
+                return
+            if not result:
+                self.root.after(80, poll)
+                return
+            self._atlas_tuning = False
+            if hasattr(self, "_atlas_auto_btn"):
+                self._atlas_auto_btn.config(state=tk.NORMAL)
+            pick, error = result[0]
+            if error or pick is None:
+                self._status_var.set("Авто-подбор не удался")
+                messagebox.showerror("Авто-подбор", f"Не удалось подобрать параметры:\n{error}")
+                return
+            self._atlas_apply_auto_params(pick)
+
+        self.root.after(80, poll)
+
+    def _atlas_apply_auto_params(self, pick):
+        self._atlas_batch = True
+        try:
+            self._atlas_thresh.set(min(100, max(0, int(pick.get("tolerance", 10)))))
+            self._atlas_min.set(min(150, max(1, int(pick.get("min_size", 3)))))
+            self._atlas_sep.set(min(150, max(0, int(pick.get("separate", 0)))))
+            self._atlas_cell.set(min(2048, max(4, int(pick.get("cell", 64)))))
+            self._atlas_cols.set(min(128, max(1, int(pick.get("cols", 8)))))
+        finally:
+            self._atlas_batch = False
+        self._atlas_update()
+        self._status_var.set(f"Авто-подбор: {pick.get('count', 0)} объектов, параметры обновлены")
 
     @file_operation
     def _atlas_save(self):
@@ -3516,6 +3710,7 @@ class SpriteManufacturerApp:
                 "atlas_dedup_thresh": self._atlas_dedup_thresh.get() if hasattr(self, "_atlas_dedup_thresh") else 95,
                 "atlas_cols":         self._atlas_cols.get() if hasattr(self, "_atlas_cols") else 8,
                 "atlas_name":         self._atlas_name.get() if hasattr(self, "_atlas_name") else "atlas",
+                "clean_residue":      self._clean_residue.get() if hasattr(self, "_clean_residue") else 8,
             },
         }
         if self.src_img is not None:
@@ -3561,6 +3756,7 @@ class SpriteManufacturerApp:
             "atlas_cell": ("_atlas_cell", 64, 4, 2048),
             "atlas_dedup_thresh": ("_atlas_dedup_thresh", 95, 50, 100),
             "atlas_cols": ("_atlas_cols", 8, 1, 128),
+            "clean_residue": ("_clean_residue", 8, 0, 64),
         }
         boolean = {"background_preview": True, "pixel_art": False, "edge_bleed": True,
                    "edge_smooth": False,
@@ -3582,7 +3778,7 @@ class SpriteManufacturerApp:
                     not isinstance(background_rgb, list) or len(background_rgb) != 3 or
                     any(type(c) is not int or not 0 <= c <= 255 for c in background_rgb)):
                 raise ValueError("Некорректный цвет фона")
-            choices = {"background_mode": ("auto", "solid", "checker", "alpha"),
+            choices = {"background_mode": ("auto", "photo", "solid", "checker", "alpha"),
                        "object_mode": ("objects", "single"),
                        "auto_scale_mode": ("none", "w", "h", "both")}
             for key, values in choices.items():
@@ -3717,22 +3913,42 @@ class SpriteManufacturerApp:
         self._sep(p)
         self._lbl(p, "Целевой размер (px):", bold=True).pack(anchor=tk.W, pady=(0, 5))
 
-        if not hasattr(self, "_resize_size_var"):
-            self._resize_size_var = tk.IntVar(value=64)
+        if not hasattr(self, "_resize_w_var"):
+            self._resize_w_var = tk.IntVar(value=64)
+        if not hasattr(self, "_resize_h_var"):
+            self._resize_h_var = tk.IntVar(value=64)
+
+        # Quick presets fill both width and height spinboxes.
         szf = tk.Frame(p, bg=self.palette.BG); szf.pack(fill=tk.X)
         for sz in (32, 64, 128, 256, 512):
-            SoftRadio(szf, text=str(sz), variable=self._resize_size_var, value=sz,
-                           bg=self.palette.BG, fg=self.palette.FG, selectcolor=self.palette.BTN, activebackground=self.palette.BG,
-                           font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=2)
+            pb = SoftButton(szf, text=str(sz), command=(lambda s=sz: self._resize_apply_preset(s)),
+                            bg=self.palette.BTN, fg=self.palette.FG,
+                            font=("Segoe UI", 9, "bold"), height=28, width=40)
+            pb.apply_theme(self.palette)
+            pb.pack(side=tk.LEFT, padx=2)
 
         self._lbl(p, "Выравнивать по:", color=self.palette.FG2).pack(anchor=tk.W, pady=(8, 2))
         if not hasattr(self, "_resize_axis"):
             self._resize_axis = tk.StringVar(value="both")
         axf = tk.Frame(p, bg=self.palette.BG); axf.pack(fill=tk.X)
-        for val, txt in (("both", "Оба (квадрат)"), ("width", "Ширина"), ("height", "Высота")):
+        for val, txt in (("both", "Оба (вручную W×H)"), ("width", "Ширина (высота авто)"),
+                         ("height", "Высота (ширина авто)")):
             SoftRadio(axf, text=txt, variable=self._resize_axis, value=val,
+                           command=self._resize_sync_axis,
                            bg=self.palette.BG, fg=self.palette.FG, selectcolor=self.palette.BTN, activebackground=self.palette.BG,
                            font=("Segoe UI", 9)).pack(anchor=tk.W)
+
+        # Manual width / height entry.
+        manf = tk.Frame(p, bg=self.palette.BG); manf.pack(fill=tk.X, pady=(6, 0))
+        self._resize_w_lbl = self._lbl(manf, "Ширина:", color=self.palette.FG2)
+        self._resize_w_lbl.pack(side=tk.LEFT)
+        self._resize_w_spin = self._spinbox(manf, self._resize_w_var, 1, 8192, w=6)
+        self._resize_w_spin.pack(side=tk.LEFT, padx=(4, 10))
+        self._resize_h_lbl = self._lbl(manf, "Высота:", color=self.palette.FG2)
+        self._resize_h_lbl.pack(side=tk.LEFT)
+        self._resize_h_spin = self._spinbox(manf, self._resize_h_var, 1, 8192, w=6)
+        self._resize_h_spin.pack(side=tk.LEFT, padx=(4, 0))
+        self._resize_sync_axis()
 
         self._sep(p)
         self._lbl(p, "Папка вывода:", bold=True).pack(anchor=tk.W, pady=(0, 3))
@@ -3759,6 +3975,23 @@ class SpriteManufacturerApp:
 
     def _resize_cancel(self):
         self._resize_cancelled = True
+
+    def _resize_apply_preset(self, size):
+        """Quick preset: fill width/height with a square value."""
+        self._resize_w_var.set(size)
+        self._resize_h_var.set(size)
+
+    def _resize_sync_axis(self):
+        """Enable only the spinbox(es) relevant to the chosen axis."""
+        if not hasattr(self, "_resize_w_spin"):
+            return
+        axis = self._resize_axis.get()
+        w_on = axis in ("both", "width")
+        h_on = axis in ("both", "height")
+        self._resize_w_spin.config(state=(tk.NORMAL if w_on else tk.DISABLED))
+        self._resize_h_spin.config(state=(tk.NORMAL if h_on else tk.DISABLED))
+        self._resize_w_lbl.config(fg=(self.palette.FG2 if w_on else self.palette.BORDER))
+        self._resize_h_lbl.config(fg=(self.palette.FG2 if h_on else self.palette.BORDER))
 
     def _resize_pick_folder(self):
         folder = filedialog.askdirectory(title="Выберите папку с изображениями")
@@ -3788,8 +4021,9 @@ class SpriteManufacturerApp:
             messagebox.showerror("Ошибка", "Папка не выбрана или не существует.")
             return
 
-        size = self._resize_size_var.get()
         axis = self._resize_axis.get()
+        target_w = max(1, self._resize_w_var.get())
+        target_h = max(1, self._resize_h_var.get())
         recursive = self._resize_recursive.get()
         same = self._resize_same_folder.get()
         outdir = self.outdir if not same else None
@@ -3856,13 +4090,13 @@ class SpriteManufacturerApp:
                     img = original.convert("RGBA")
                 w, h = img.size
                 if axis == "both":
-                    new_w, new_h = size, size
+                    new_w, new_h = target_w, target_h
                 elif axis == "width":
-                    new_w = size
-                    new_h = max(1, round(h * size / w)) if w else size
+                    new_w = target_w
+                    new_h = max(1, round(h * target_w / w)) if w else target_w
                 else:  # height
-                    new_h = size
-                    new_w = max(1, round(w * size / h)) if h else size
+                    new_h = target_h
+                    new_w = max(1, round(w * target_h / h)) if h else target_h
                 img = img.resize((new_w, new_h), self._resampling())
 
                 if same:
@@ -3895,6 +4129,56 @@ class SpriteManufacturerApp:
         self.root.after(10, step)
 
     # ══════════════════════════════════════════════════════════════════
+    #  WATCHDOG (hang detection)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _watchdog_start(self, timeout=10.0):
+        """Spawn a side process that offers wait/restart/close if the UI freezes."""
+        if self._watchdog_proc or "--smoke-test" in sys.argv or os.environ.get("SM_NO_WATCHDOG"):
+            return
+        try:
+            self._watchdog_dir = tempfile.mkdtemp(prefix="sm_watchdog_")
+            beat = os.path.join(self._watchdog_dir, "beat")
+            with open(beat, "w", encoding="utf-8") as handle:
+                handle.write("ok")
+            self._watchdog_beat_path = beat
+            frozen = bool(getattr(sys, "frozen", False))
+            script = os.path.abspath(__file__)
+            if frozen:
+                cmd = [sys.executable, "--sm-watchdog"]
+            else:
+                cmd = [sys.executable, os.path.join(os.path.dirname(script), "hang_watchdog.py")]
+            restart = [sys.executable] + ([] if frozen else [script]) + sys.argv[1:]
+            cmd += ["--pid", str(os.getpid()), "--beat", beat,
+                    "--timeout", str(timeout),
+                    "--cwd", os.getcwd(),
+                    "--restart", json.dumps(restart)]
+            self._watchdog_proc = subprocess.Popen(cmd, start_new_session=True)
+            self.root.after(1000, self._watchdog_beat)
+        except Exception:
+            self._watchdog_proc = None
+
+    def _watchdog_beat(self):
+        if self._closing:
+            return
+        try:
+            os.utime(self._watchdog_beat_path, None)
+        except OSError:
+            return
+        self.root.after(1000, self._watchdog_beat)
+
+    def _watchdog_stop(self):
+        proc, self._watchdog_proc = self._watchdog_proc, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        directory, self._watchdog_dir = getattr(self, "_watchdog_dir", None), None
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    # ══════════════════════════════════════════════════════════════════
     #  MISC
     # ══════════════════════════════════════════════════════════════════
 
@@ -3909,6 +4193,9 @@ class SpriteManufacturerApp:
 
 
 if __name__ == "__main__":
+    if "--sm-watchdog" in sys.argv:
+        from hang_watchdog import main as _watchdog_main
+        sys.exit(_watchdog_main(sys.argv[1:]))
     root = TkinterDnD.Tk(className="SpriteManufacturer")
     app = SpriteManufacturerApp(root)
     root.update()
@@ -3918,4 +4205,6 @@ if __name__ == "__main__":
             app._tool_set(name)
             root.update_idletasks()
         root.after(100, root.destroy)
+    else:
+        app._watchdog_start()
     root.mainloop()
